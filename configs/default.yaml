@@ -1,0 +1,41 @@
+# Default configuration for the AIoT precision-agriculture pipeline.
+# All values here mirror dataclass defaults in src/config.py.
+# Override individual fields as needed.
+
+data_loader:
+  mendeley_dir: >-
+    Smart irrigation control system data with soil moisture, flow meter
+    and electrovalve relay
+  raw_cache_dir: data/raw
+  processed_dir: data/processed
+  resample_freq: "1h"
+  use_cache: false
+  nasa_power:
+    latitude: 49.80
+    longitude: 73.10
+    parameters:
+      - T2M
+      - RH2M
+      - WS2M
+      - ALLSKY_SFC_SW_DWN
+    community: AG
+    temporal: hourly
+    base_url: https://power.larc.nasa.gov/api/temporal
+    time_standard: UTC
+
+corruption:
+  missing:
+    rate: 0.10
+    mechanism: mcar        # "mcar" | "heat_dependent"
+    seed: 42
+    heat_midpoint_c: 35.0  # °C — logistic midpoint
+    heat_steepness: 0.3    # logistic steepness k
+
+  drift:
+    a: 5.545                 # asymptotic max drift (%)
+    b: 0.08                # exponential rate (1/h)
+    recalibration_interval_hours: [35, 40]
+    ec_factor: null         # set to e.g. 0.1 to enable EC distortion
+    ec_moisture_coeff: 0.005
+    ec_salt_concentration: 2.0  # dS/m — Soil Systems 2025
+    seed: 42

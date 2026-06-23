@@ -1,0 +1,63 @@
+datasets:
+- name: Smart Irrigation Control System Data
+  source: Mendeley Data
+  doi: 10.17632/cjb4vy4mzj.3
+  url: https://data.mendeley.com/datasets/cjb4vy4mzj/3
+  license: CC BY 4.0
+  accessed: '2026-06-22'
+  files:
+  - D_moisture.txt
+  - D_valve.txt
+  - D_flowmeter.txt
+  date_range: 2022-07-12 to 2022-09-16
+  notes: Soil moisture, electrovalve relay status, cumulative flow meter data.
+- name: NASA POWER Hourly Meteorological Data
+  source: NASA Langley POWER Project (MERRA-2 reanalysis)
+  url: https://power.larc.nasa.gov/api/temporal/hourly/point
+  license: Public domain (NASA Open Data Policy)
+  accessed: '2026-06-22'
+  parameters:
+  - T2M
+  - RH2M
+  - WS2M
+  - ALLSKY_SFC_SW_DWN
+  coordinates:
+    lat: 49.8
+    lon: 73.1
+  date_range: 2022-07-12 to 2022-09-16
+  date_shift_applied: false
+  time_standard: UTC
+  notes: NASA POWER MERRA-2 reanalysis covers the exact Mendeley observation period.
+    No calendar-date shift was necessary. The API is called with time-standard=UTC
+    to avoid silent misalignment with Mendeley sensor clock-times (the POWER Hourly
+    API defaults to Local Solar Time).
+output_conventions:
+  timestamp_column:
+    timezone: UTC
+    note: All timestamps in the final merged DataFrame are in UTC. Mendeley sensor
+      timestamps are assumed to be in UTC or a close local-time proxy; NASA POWER
+      data is explicitly requested in UTC via time-standard=UTC. Users should be aware
+      of potential sub-hourly offsets if the original Mendeley sensors used a non-UTC
+      wall clock.
+  flow_l: Differential (per-period) volume computed from the cumulative flow-meter
+    readings.
+  flow_l_cumulative: Raw cumulative readings preserved from D_flowmeter.txt.
+  solar_radiation:
+    unit: W/m²
+    native_unit: MJ/m²/hr (NASA POWER ALLSKY_SFC_SW_DWN)
+    conversion: multiplied by 277.78 (1 MJ/hr = 10⁶ J / 3600 s ≈ 277.78 W)
+    note: The NASA POWER Hourly API returns ALLSKY_SFC_SW_DWN in MJ/m²/hr. Values
+      are converted to W/m² during merge for consistency with standard SI irradiance
+      units.
+assumptions:
+- id: A1
+  description: NASA POWER provides reanalysis data for Karaganda, KZ — not in-situ
+    measurements from the Mendeley sensor farm location. Weather data is used as a
+    regional proxy.
+- id: A2
+  description: 'ec_salt_concentration defaults to 2.0 dS/m, corresponding to the secondary
+    salinization threshold for irrigated Haplic Kastanozem soils in the Kazakhstan
+    steppe zone (Pavlodar region), as reported in: Soil Systems, 2025, doi:10.3390/soilsystems9020057.
+    The ec_factor in drift injection is a documented approximation (EC ≈ f(soil_moisture,
+    salt_concentration)), NOT a calibrated physical model. See Review §2.3.1, sources
+    [3, 4].'
