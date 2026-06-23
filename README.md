@@ -264,30 +264,6 @@ The project emphasizes deterministic scientific experimentation through:
 
 ---
 
-# 13. Citation
-
-If you use this repository in academic research, please cite:
-
-```bibtex
-@mastersthesis{shaya_water_management_2026,
-  author       = {Your Name and Shaya, Ibrahim},
-  title        = {AI-Driven Efficient Water Management and Agricultural Production Systems Based on IoT Systems},
-  school       = {Department of Technologies and Information Systems},
-  year         = {2026},
-  address      = {Karaganda, Kazakhstan},
-  month        = {June},
-  note         = {Targeted for IEEE/Elsevier Q1 Open Science Publications}
-}
-```
-
----
-
-# 14. License
+# 13. License
 
 This repository is intended for academic research and educational purposes. Please consult the repository license for detailed usage conditions.
-
----
-
-# 15. Acknowledgments
-
-This work was developed as part of a Master's Thesis under the academic supervision of **Professor Ibrahim Shaya** and focuses on robust AI-enabled precision agriculture through resilient IoT infrastructures, self-healing data pipelines, and explainable machine learning.
