@@ -88,8 +88,13 @@ def git_provenance() -> Dict[str, Any]:
     the flag is recorded rather than silently omitted.
     """
     commit = _git("rev-parse", "HEAD")
-    status = _git("status", "--porcelain")
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    # Tracked modifications only. Counting untracked files would make
+    # every run flag itself as dirty, since writing this very directory
+    # creates them — the flag has to describe the code that produced the
+    # results, not the artefacts they consist of.
+    tracked_changes = _git("status", "--porcelain", "--untracked-files=no")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
 
     if commit is None:
         return {
@@ -99,11 +104,16 @@ def git_provenance() -> Dict[str, Any]:
             "note": "Not a git repository, or git is unavailable.",
         }
 
-    dirty = bool(status)
-    provenance = {"commit": commit, "branch": branch, "dirty": dirty}
+    dirty = bool(tracked_changes)
+    provenance = {
+        "commit": commit,
+        "branch": branch,
+        "dirty": dirty,
+        "untracked_files": len(untracked.splitlines()) if untracked else 0,
+    }
     if dirty:
         provenance["note"] = (
-            "The working tree had uncommitted changes when these results "
+            "Tracked files had uncommitted modifications when these results "
             "were produced, so they do not correspond to this commit alone "
             "and are not reproducible from it. Commit before quoting them."
         )

@@ -119,6 +119,28 @@ class TestProvenance:
         if provenance["dirty"]:
             assert "not reproducible" in provenance["note"]
 
+    def test_dirty_ignores_untracked_files(self) -> None:
+        """Otherwise every run flags itself dirty.
+
+        The run writes data/outputs/, so if those files are untracked
+        they appear in `git status --porcelain` and the flag would be
+        true on every clean checkout — describing the artefacts instead
+        of the code that produced them.
+        """
+        import subprocess
+
+        tracked = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        assert git_provenance()["dirty"] == bool(tracked)
+
+    def test_untracked_count_is_reported_separately(self) -> None:
+        """Hidden, not ignored: the count is still recorded."""
+        provenance = git_provenance()
+        assert isinstance(provenance["untracked_files"], int)
+        assert provenance["untracked_files"] >= 0
+
     def test_tracks_every_version_affecting_numbers(self) -> None:
         versions = package_versions()
         assert "python" in versions
