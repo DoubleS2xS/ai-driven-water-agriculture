@@ -1,0 +1,54 @@
+{
+  "generated_utc": "2026-08-16T16:27:59+00:00",
+  "git": {
+    "commit": "050a8256d4612bbdff671cc293d127cb625e8fed",
+    "branch": "main",
+    "dirty": false,
+    "untracked_files": 20
+  },
+  "environment": {
+    "platform": "macOS-14.4.1-arm64-arm-64bit",
+    "python_executable": "/Users/doubles/Desktop/GITHUB PROJECTS/ai-driven-water-agriculture/.venv/bin/python",
+    "python": "3.12.0",
+    "numpy": "2.0.2",
+    "pandas": "2.3.3",
+    "scipy": "1.18.0",
+    "sklearn": "1.5.0",
+    "xgboost": "2.1.0",
+    "lightgbm": "4.4.0",
+    "shap": "0.52.0"
+  },
+  "dataset": {
+    "n_rows": 1313,
+    "n_features": 40,
+    "positive_rate": 0.2361005331302361,
+    "n_positive": 310,
+    "start_utc": "2022-07-13 04:00:00",
+    "end_utc": "2022-09-17 03:00:00"
+  },
+  "protocol": {
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "n_seeds": 10,
+    "n_folds": 5,
+    "validation": "rolling-origin, expanding window, no shuffle"
+  },
+  "site": {
+    "latitude": -25.31,
+    "longitude": -57.39,
+    "site_name": "Areguá, Central Department, Paraguay",
+    "country": "Paraguay",
+    "crop": "strawberry",
+    "mendeley_utc_offset_hours": -4.0
+  }
+}

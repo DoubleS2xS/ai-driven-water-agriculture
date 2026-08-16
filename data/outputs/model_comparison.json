@@ -1,0 +1,17 @@
+{
+  "available": true,
+  "metric": "roc_auc",
+  "observed_diff": -0.01528132482879796,
+  "p_value": 0.0074,
+  "ci_low": -0.03475813012428507,
+  "ci_high": -0.0032256359228903767,
+  "n_valid": 10000,
+  "n_iterations": 10000,
+  "block_size": 24,
+  "seed": 42,
+  "model_a": "lightgbm",
+  "model_b": "logistic",
+  "p_value_iid": 0.002,
+  "interpretation": "The 95% CI of the difference excludes zero; the ranking is distinguishable from chance on this sample.",
+  "p_value_note": "p_value uses a moving-block bootstrap and is the one to quote. p_value_iid ignores temporal dependence and is reported only to show the size of that effect."
+}
