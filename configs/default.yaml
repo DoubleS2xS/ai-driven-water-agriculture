@@ -10,9 +10,28 @@ data_loader:
   processed_dir: data/processed
   resample_freq: "1h"
   use_cache: false
+  # Wall clock of the Mendeley sensor loggers: local = UTC + offset.
+  # Paraguay = UTC-04:00 (PYT) for the whole 2022-07-12 → 2022-09-16
+  # window; PYST (UTC-03:00) runs Oct → Mar and does not apply.
+  # Local timestamps are therefore converted to UTC by adding 4 hours.
+  mendeley_utc_offset_hours: -4.0
+  # Half-width (hours) of the acceptance window for the post-merge
+  # solar-radiation diurnal check. Expected peak hour is derived from
+  # mendeley_utc_offset_hours, not hard-coded (-> 16:00 UTC).
+  # 2 h, because a clock-derived expectation never matches solar geometry
+  # exactly: Areguá is 2.6° west of the 60°W zone meridian, so true solar
+  # noon is 15.83 UTC (bin 15), plus ±0.5 h of hourly binning. Still far
+  # tighter than the errors it catches (Karaganda peaked at 07:00 UTC;
+  # a Local-Solar-Time response peaks at 12:00).
+  solar_peak_tolerance_hours: 2.0
   nasa_power:
-    latitude: 49.80
-    longitude: 73.10
+    # Areguá, Central Department, Paraguay — the strawberry-producing
+    # district where the Mendeley dataset was recorded.
+    latitude: -25.31
+    longitude: -57.39
+    site_name: "Areguá, Central Department, Paraguay"
+    country: Paraguay
+    crop: strawberry
     parameters:
       - T2M
       - RH2M

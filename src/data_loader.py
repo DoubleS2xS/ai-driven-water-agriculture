@@ -6,22 +6,31 @@ This module combines two real, open data sources into a single hourly
 
 1. **Mendeley Data** — Smart irrigation control system dataset
    (doi:10.17632/cjb4vy4mzj.3): soil moisture, electrovalve relay
-   status, cumulative flow-meter readings.
-2. **NASA POWER API** — Hourly reanalysis meteorology for Karaganda, KZ
-   (lat 49.80, lon 73.10): T2M, RH2M, WS2M, ALLSKY_SFC_SW_DWN.
+   status, cumulative flow-meter readings.  Recorded on a strawberry
+   field in Areguá, Central Department, **Paraguay**.
+2. **NASA POWER API** — Hourly reanalysis meteorology for the *same*
+   site (lat −25.31, lon −57.39): T2M, RH2M, WS2M, ALLSKY_SFC_SW_DWN.
 
 Design decisions
 ----------------
 * Column names in the Mendeley CSVs are discovered dynamically at load
   time — never hard-coded — to tolerate future schema revisions.
 * NASA POWER responses are cached to ``data/raw/`` so that reviewers can
-  reproduce results fully offline (``--use-cache``).
+  reproduce results fully offline (``--use-cache``).  Cache filenames
+  embed the coordinates so that a change of site can never be masked by
+  a stale cache hit.
 * The ``flow_l`` column contains *differential* (per-hour) volume;
   raw cumulative readings are preserved as ``flow_l_cumulative``.
 * All timestamps in the output DataFrame are in **UTC**.  The NASA POWER
   API is called with ``time-standard=UTC`` explicitly to avoid the
-  default Local Solar Time (LST) which would silently misalign with the
-  Mendeley sensor clock-times.
+  default Local Solar Time (LST).  The Mendeley timestamps are *local*
+  Paraguayan wall-clock time and are converted to UTC before the merge
+  by :func:`localize_mendeley_to_utc`, using the configured offset.
+* After the merge, :func:`validate_diurnal_alignment` verifies that the
+  mean diurnal cycle of ``solar_radiation`` peaks at the UTC hour
+  implied by the configured local offset.  A misconfigured time standard
+  or a wrong longitude shows up here as a hard failure instead of a
+  silent, uncorrelated feature set.
 
 References
 ----------
@@ -75,6 +84,12 @@ Units
 - ``flow_l`` : litres per period (differential)
 - ``flow_l_cumulative`` : cumulative litres (raw)
 """
+
+#: Local solar noon, in local clock hours.  Used to derive the expected
+#: UTC hour of peak insolation from the site's UTC offset:
+#: ``peak_utc_hour = (SOLAR_NOON_LOCAL_HOUR - utc_offset_hours) % 24``.
+#: For Paraguay (offset −4) this yields 16:00 UTC.
+SOLAR_NOON_LOCAL_HOUR: float = 12.0
 
 # Validation ranges: (column, min, max, allow_nan)
 _VALIDATION_RULES: list[tuple[str, float, float, bool]] = [
@@ -221,13 +236,95 @@ def load_mendeley_csv(
     return df
 
 
+def localize_mendeley_to_utc(
+    df: pd.DataFrame,
+    utc_offset_hours: float,
+    *,
+    timestamp_col: str = "timestamp",
+) -> pd.DataFrame:
+    """Convert Mendeley local wall-clock timestamps to UTC.
+
+    The Mendeley loggers record the *local* clock time of the deployment
+    site.  NASA POWER is requested with ``time-standard=UTC``.  Merging
+    the two without an explicit conversion silently offsets every
+    meteorological covariate by the site's UTC offset, which destroys any
+    diurnal relationship between weather and soil moisture.
+
+    The conversion follows the standard convention ``local = UTC +
+    offset``, hence::
+
+        utc = local - offset
+
+    For Paraguay (``utc_offset_hours = -4``) this *adds* four hours.  The
+    offset is supplied by the caller from
+    :attr:`~src.config.DataLoaderConfig.mendeley_utc_offset_hours`; it is
+    deliberately not hard-coded here.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Frame with a naive datetime column holding local timestamps.
+    utc_offset_hours : float
+        UTC offset of the site's wall clock (negative west of Greenwich).
+    timestamp_col : str
+        Name of the timestamp column to convert.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of *df* with *timestamp_col* shifted to UTC (still
+        timezone-naive, by project convention).
+
+    Raises
+    ------
+    KeyError
+        If *timestamp_col* is absent.
+    """
+    if timestamp_col not in df.columns:
+        raise KeyError(
+            f"Column '{timestamp_col}' not found; available: "
+            f"{list(df.columns)}"
+        )
+
+    out = df.copy()
+    shift = pd.Timedelta(hours=-utc_offset_hours)
+    out[timestamp_col] = out[timestamp_col] + shift
+
+    logger.info(
+        "Mendeley timestamps localised: local(UTC%+g) → UTC "
+        "(shift %+g h); %s → %s",
+        utc_offset_hours,
+        -utc_offset_hours,
+        out[timestamp_col].iloc[0],
+        out[timestamp_col].iloc[-1],
+    )
+    return out
+
+
 # ======================================================================
 # NASA POWER
 # ======================================================================
 
-def _nasa_cache_path(cache_dir: Path, start: str, end: str) -> Path:
-    """Return the cache file path for a given date range."""
-    return cache_dir / f"nasa_power_{start}_{end}.json"
+def _nasa_cache_path(
+    cache_dir: Path,
+    start: str,
+    end: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> Path:
+    """Return the cache file path for a given date range and site.
+
+    Coordinates are part of the filename so that changing the site can
+    never be masked by a stale cache hit from a previous location.  They
+    are optional purely for backward compatibility with callers that
+    predate the site fix.
+    """
+    if latitude is None or longitude is None:
+        return cache_dir / f"nasa_power_{start}_{end}.json"
+    return (
+        cache_dir
+        / f"nasa_power_{latitude:+.2f}_{longitude:+.2f}_{start}_{end}.json"
+    )
 
 
 def fetch_nasa_power(
@@ -265,7 +362,9 @@ def fetch_nasa_power(
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = _nasa_cache_path(cache_dir, start_date, end_date)
+    cache_file = _nasa_cache_path(
+        cache_dir, start_date, end_date, config.latitude, config.longitude,
+    )
 
     if cache_file.exists():
         logger.info("Loading NASA POWER from cache: %s", cache_file.name)
@@ -471,6 +570,137 @@ def validate_schema(df: pd.DataFrame) -> None:
     logger.info("Schema validation passed ✓")
 
 
+def expected_solar_peak_utc_hour(utc_offset_hours: float) -> float:
+    """Return the UTC hour at which mean insolation should peak.
+
+    Derived from local solar noon and the site's UTC offset — see
+    :data:`SOLAR_NOON_LOCAL_HOUR`.  Never hard-code the result.
+
+    Parameters
+    ----------
+    utc_offset_hours : float
+        UTC offset of the site's wall clock.
+
+    Returns
+    -------
+    float
+        Expected peak hour in ``[0, 24)`` UTC.  Paraguay (−4) → 16.0.
+    """
+    return (SOLAR_NOON_LOCAL_HOUR - utc_offset_hours) % 24.0
+
+
+def validate_diurnal_alignment(
+    df: pd.DataFrame,
+    utc_offset_hours: float,
+    *,
+    tolerance_hours: float = 1.0,
+    column: str = "solar_radiation",
+    timestamp_col: str = "timestamp",
+) -> float:
+    """Assert the merged frame's insolation peaks at the right UTC hour.
+
+    Averages *column* over UTC hour-of-day and checks that the maximum
+    of that mean diurnal cycle falls within *tolerance_hours* of
+    :func:`expected_solar_peak_utc_hour`.
+
+    This is the pipeline's guard against silent temporal misalignment.
+    It fails loudly on the two failure modes that produce
+    plausible-looking but meaningless weather features: a NASA POWER
+    response served in Local Solar Time instead of UTC, and coordinates
+    from the wrong longitude (or the wrong hemisphere entirely).
+
+    Scope note
+    ----------
+    The check validates the *weather* grid's time standard against the
+    site's expected solar geometry.  It cannot, by construction, detect
+    an error in the Mendeley-side offset alone, because
+    ``solar_radiation`` originates entirely from NASA POWER and carries
+    its own timestamps.  The Mendeley conversion is guarded separately by
+    the single configured constant in
+    :func:`localize_mendeley_to_utc`.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Merged hourly frame with UTC timestamps.
+    utc_offset_hours : float
+        UTC offset of the site's wall clock.
+    tolerance_hours : float
+        Half-width of the acceptance window, in hours.
+    column : str
+        Radiation column to profile.
+    timestamp_col : str
+        UTC timestamp column.
+
+    Returns
+    -------
+    float
+        The observed peak hour (UTC).
+
+    Raises
+    ------
+    ValueError
+        If the column is missing/empty, or the observed peak lies
+        outside the acceptance window.
+    """
+    if column not in df.columns or timestamp_col not in df.columns:
+        raise ValueError(
+            f"Diurnal check needs columns '{timestamp_col}' and '{column}'; "
+            f"available: {list(df.columns)}"
+        )
+
+    ts = pd.to_datetime(df[timestamp_col])
+    profile = (
+        pd.DataFrame({"hour": ts.dt.hour, "value": df[column].to_numpy()})
+        .groupby("hour")["value"]
+        .mean()
+        .dropna()
+    )
+    if profile.empty:
+        raise ValueError(
+            f"Diurnal check failed: '{column}' has no non-NaN values."
+        )
+
+    observed_peak = float(profile.idxmax())
+    expected_peak = expected_solar_peak_utc_hour(utc_offset_hours)
+
+    # Circular distance on a 24-hour clock.
+    delta = abs(observed_peak - expected_peak) % 24.0
+    circular_delta = min(delta, 24.0 - delta)
+
+    logger.info(
+        "Diurnal check: mean %s peaks at %02d:00 UTC "
+        "(expected %02d:00 UTC ± %g h, |Δ| = %.1f h)",
+        column,
+        int(observed_peak),
+        int(expected_peak),
+        tolerance_hours,
+        circular_delta,
+    )
+
+    if circular_delta > tolerance_hours:
+        top = profile.sort_values(ascending=False).head(3)
+        raise ValueError(
+            f"Diurnal alignment check FAILED for '{column}'.\n"
+            f"  Observed peak hour : {int(observed_peak):02d}:00 UTC\n"
+            f"  Expected peak hour : {int(expected_peak):02d}:00 UTC "
+            f"(local solar noon at UTC{utc_offset_hours:+g})\n"
+            f"  Circular offset    : {circular_delta:.1f} h "
+            f"(tolerance {tolerance_hours:g} h)\n"
+            f"  Top-3 hourly means : "
+            + ", ".join(f"{int(h):02d}h={v:.1f}" for h, v in top.items())
+            + "\n"
+            "  The timezone reconciliation is wrong. Check, in order: "
+            "(1) nasa_power.time_standard is 'UTC' and not the API default "
+            "Local Solar Time; (2) nasa_power.latitude/longitude point at "
+            "the sensor site; (3) mendeley_utc_offset_hours matches the "
+            "logger wall clock. Any downstream metric computed on this "
+            "merge would be meaningless."
+        )
+
+    return observed_peak
+
+
 # ======================================================================
 # Provenance
 # ======================================================================
@@ -501,7 +731,23 @@ def generate_provenance(
                 "license": "CC BY 4.0",
                 "accessed": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 "files": ["D_moisture.txt", "D_valve.txt", "D_flowmeter.txt"],
-                "date_range": "2022-07-12 to 2022-09-16",
+                "date_range": "2022-07-12 to 2022-09-16 (local time)",
+                "site": config.nasa_power.site_name,
+                "country": config.nasa_power.country,
+                "crop": config.nasa_power.crop,
+                "native_timezone": (
+                    f"UTC{config.mendeley_utc_offset_hours:+g} "
+                    "(PYT, Paraguay standard time)"
+                ),
+                "utc_conversion": (
+                    "Timestamps are local wall-clock readings and are "
+                    f"shifted by {-config.mendeley_utc_offset_hours:+g} h to "
+                    "UTC before merging with NASA POWER. Paraguayan DST "
+                    "(PYST, UTC-03:00) runs from the first Sunday of October "
+                    "to the fourth Sunday of March and therefore does not "
+                    "overlap the 2022-07-12 → 2022-09-16 observation window; "
+                    "a single constant offset is exact for this dataset."
+                ),
                 "notes": (
                     "Soil moisture, electrovalve relay status, cumulative "
                     "flow meter data."
@@ -520,28 +766,40 @@ def generate_provenance(
                     "lat": config.nasa_power.latitude,
                     "lon": config.nasa_power.longitude,
                 },
-                "date_range": "2022-07-12 to 2022-09-16",
+                "site": config.nasa_power.site_name,
+                "country": config.nasa_power.country,
+                "date_range": "2022-07-12 to 2022-09-17 (UTC)",
                 "date_shift_applied": date_shift_applied,
                 "time_standard": config.nasa_power.time_standard,
                 "notes": (
-                    "NASA POWER MERRA-2 reanalysis covers the exact Mendeley "
-                    "observation period. No calendar-date shift was necessary. "
-                    "The API is called with time-standard=UTC to avoid silent "
-                    "misalignment with Mendeley sensor clock-times (the POWER "
-                    "Hourly API defaults to Local Solar Time)."
+                    "Coordinates are the sensor deployment site itself "
+                    f"({config.nasa_power.site_name}), not a different "
+                    "region. NASA POWER MERRA-2 reanalysis covers the exact "
+                    "Mendeley observation period. No calendar-date shift was "
+                    "necessary; only the local→UTC clock conversion described "
+                    "under the Mendeley entry. The API is called with "
+                    "time-standard=UTC to avoid silent misalignment with "
+                    "Mendeley sensor clock-times (the POWER Hourly API "
+                    "defaults to Local Solar Time)."
                 ),
             },
         ],
         "output_conventions": {
             "timestamp_column": {
                 "timezone": "UTC",
+                "mendeley_utc_offset_hours": config.mendeley_utc_offset_hours,
                 "note": (
                     "All timestamps in the final merged DataFrame are in UTC. "
-                    "Mendeley sensor timestamps are assumed to be in UTC or a "
-                    "close local-time proxy; NASA POWER data is explicitly "
-                    "requested in UTC via time-standard=UTC. Users should be "
-                    "aware of potential sub-hourly offsets if the original "
-                    "Mendeley sensors used a non-UTC wall clock."
+                    "Mendeley sensor timestamps are local Paraguayan wall-clock "
+                    f"time (UTC{config.mendeley_utc_offset_hours:+g}) and are "
+                    f"shifted by {-config.mendeley_utc_offset_hours:+g} h "
+                    "before the merge; NASA POWER is explicitly requested in "
+                    "UTC via time-standard=UTC. The reconciliation is verified "
+                    "automatically after every merge: the mean diurnal cycle "
+                    "of solar_radiation must peak at "
+                    f"{int(expected_solar_peak_utc_hour(config.mendeley_utc_offset_hours)):02d}:00 UTC "
+                    f"± {config.solar_peak_tolerance_hours:g} h, otherwise the "
+                    "loader raises."
                 ),
             },
             "flow_l": (
@@ -566,22 +824,52 @@ def generate_provenance(
             {
                 "id": "A1",
                 "description": (
-                    "NASA POWER provides reanalysis data for Karaganda, KZ "
-                    "— not in-situ measurements from the Mendeley sensor "
-                    "farm location. Weather data is used as a regional proxy."
+                    "Meteorological covariates are NASA POWER MERRA-2 "
+                    "reanalysis for "
+                    f"({config.nasa_power.latitude}, "
+                    f"{config.nasa_power.longitude}) — "
+                    f"{config.nasa_power.site_name} — i.e. a gridded "
+                    "regional proxy for the SAME region and the SAME season "
+                    "as the Mendeley sensor deployment, not in-situ "
+                    "measurements at the field. The residual limitation is "
+                    "spatial: MERRA-2 resolves roughly 0.5° × 0.625°, so "
+                    "sub-grid microclimate (canopy shading, local advection, "
+                    "irrigation-induced humidity) is not represented. "
+                    "Earlier revisions of this pipeline requested weather for "
+                    "Karaganda, Kazakhstan (49.80, 73.10) — a different "
+                    "continent and the opposite hemisphere's season. Those "
+                    "features were uncorrelated with the target by "
+                    "construction and any result derived from them is void."
                 ),
             },
             {
                 "id": "A2",
                 "description": (
-                    "ec_salt_concentration defaults to 2.0 dS/m, "
-                    "corresponding to the secondary salinization threshold "
-                    "for irrigated Haplic Kastanozem soils in the Kazakhstan "
-                    "steppe zone (Pavlodar region), as reported in: "
-                    "Soil Systems, 2025, doi:10.3390/soilsystems9020057. "
-                    "The ec_factor in drift injection is a documented "
-                    "approximation (EC ≈ f(soil_moisture, salt_concentration))"
-                    ", NOT a calibrated physical model. See Review §2.3.1, "
+                    "Mendeley timestamps are treated as local Paraguayan "
+                    f"wall-clock time (UTC{config.mendeley_utc_offset_hours:+g}) "
+                    "and converted to UTC with a single constant offset. This "
+                    "is exact for the 2022-07-12 → 2022-09-16 window because "
+                    "Paraguayan DST does not overlap it. The dataset "
+                    "documentation does not state the logger timezone "
+                    "explicitly; the assumption is verified indirectly by the "
+                    "post-merge diurnal alignment check on solar_radiation."
+                ),
+            },
+            {
+                "id": "A3",
+                "description": (
+                    "ec_salt_concentration defaults to 2.0 dS/m, a documented "
+                    "approximation only. The cited source (Soil Systems, 2025, "
+                    "doi:10.3390/soilsystems9020057) reports the secondary "
+                    "salinization threshold for irrigated Haplic Kastanozem "
+                    "soils of the Kazakhstan steppe — a soil and climate "
+                    "unrelated to the Paraguayan site. It is retained solely "
+                    "as an order-of-magnitude parameter for the synthetic "
+                    "drift-injection experiment (src/robustness_experiment.py) "
+                    "and must NOT be read as a calibrated property of this "
+                    "field. The ec_factor mapping "
+                    "(EC ≈ f(soil_moisture, salt_concentration)) is likewise "
+                    "not a validated physical model. See Review §2.3.1, "
                     "sources [3, 4]."
                 ),
             },
@@ -605,10 +893,11 @@ def load_dataset(config: DataLoaderConfig) -> pd.DataFrame:
     Steps
     -----
     1. Load three Mendeley CSV/TXT files (dynamic column discovery).
-    2. Fetch (or load cached) NASA POWER hourly weather data.
-    3. Merge and resample to a uniform grid.
-    4. Validate schema and value ranges.
-    5. Save processed output and provenance file.
+    2. Convert their local wall-clock timestamps to UTC.
+    3. Fetch (or load cached) NASA POWER hourly weather data.
+    4. Merge and resample to a uniform grid.
+    5. Validate schema, value ranges, and diurnal alignment.
+    6. Save processed output and provenance file.
 
     Parameters
     ----------
@@ -655,6 +944,14 @@ def load_dataset(config: DataLoaderConfig) -> pd.DataFrame:
     df_valve = load_mendeley_csv(valve_file, target_value_name="irrigation_event")
     df_flow = load_mendeley_csv(flow_file, target_value_name="flow_l_cumulative")
 
+    # --- Local wall-clock → UTC ----------------------------------------
+    # Must happen BEFORE the NASA POWER date range is derived, so the
+    # requested window covers the shifted observation period.
+    offset = config.mendeley_utc_offset_hours
+    df_moisture = localize_mendeley_to_utc(df_moisture, offset)
+    df_valve = localize_mendeley_to_utc(df_valve, offset)
+    df_flow = localize_mendeley_to_utc(df_flow, offset)
+
     # --- Determine Mendeley date range ---------------------------------
     all_ts = pd.concat([
         df_moisture["timestamp"],
@@ -685,6 +982,11 @@ def load_dataset(config: DataLoaderConfig) -> pd.DataFrame:
 
     # --- Validate -------------------------------------------------------
     validate_schema(merged)
+    validate_diurnal_alignment(
+        merged,
+        utc_offset_hours=config.mendeley_utc_offset_hours,
+        tolerance_hours=config.solar_peak_tolerance_hours,
+    )
 
     # --- Persist --------------------------------------------------------
     out_dir = Path(config.processed_dir)

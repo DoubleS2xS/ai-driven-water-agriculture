@@ -16,8 +16,12 @@ from src.config import DataLoaderConfig, NASAPowerConfig
 from src.data_loader import (
     EXPECTED_COLUMNS,
     _identify_columns,
+    _nasa_cache_path,
+    expected_solar_peak_utc_hour,
     load_mendeley_csv,
+    localize_mendeley_to_utc,
     merge_and_resample,
+    validate_diurnal_alignment,
     validate_schema,
     generate_provenance,
     fetch_nasa_power,
@@ -192,6 +196,141 @@ class TestMergeAndResample:
         assert (diffs == pd.Timedelta("1h")).all()
 
 
+# ── Timezone reconciliation ──────────────────────────────────────────
+
+
+def _synthetic_diurnal_frame(
+    peak_utc_hour: int, n_days: int = 10,
+) -> pd.DataFrame:
+    """Build a frame whose solar_radiation peaks at a known UTC hour.
+
+    A clipped cosine centred on *peak_utc_hour* mimics the shape of a
+    real insolation cycle closely enough for the alignment check.
+    """
+    ts = pd.date_range("2022-07-12", periods=n_days * 24, freq="1h")
+    angle = 2 * np.pi * (ts.hour - peak_utc_hour) / 24.0
+    radiation = np.clip(800.0 * np.cos(angle), 0.0, None)
+    return pd.DataFrame({"timestamp": ts, "solar_radiation": radiation})
+
+
+class TestLocalizeToUTC:
+    def test_paraguay_offset_adds_four_hours(self) -> None:
+        """local = UTC + offset, so UTC = local - (-4) = local + 4 h."""
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(["2022-07-12 00:03:51"]),
+            "soil_moisture": [74.29],
+        })
+        out = localize_mendeley_to_utc(df, utc_offset_hours=-4.0)
+        assert out["timestamp"].iloc[0] == pd.Timestamp("2022-07-12 04:03:51")
+
+    def test_zero_offset_is_identity(self) -> None:
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(["2022-07-12 00:00:00"]),
+            "v": [1.0],
+        })
+        out = localize_mendeley_to_utc(df, utc_offset_hours=0.0)
+        assert out["timestamp"].iloc[0] == pd.Timestamp("2022-07-12 00:00:00")
+
+    def test_input_not_mutated(self) -> None:
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(["2022-07-12 00:00:00"]),
+            "v": [1.0],
+        })
+        original = df["timestamp"].iloc[0]
+        localize_mendeley_to_utc(df, utc_offset_hours=-4.0)
+        assert df["timestamp"].iloc[0] == original
+
+    def test_missing_column_raises(self) -> None:
+        df = pd.DataFrame({"not_a_timestamp": [1]})
+        with pytest.raises(KeyError, match="timestamp"):
+            localize_mendeley_to_utc(df, utc_offset_hours=-4.0)
+
+
+class TestExpectedSolarPeak:
+    def test_paraguay_expects_16_utc(self) -> None:
+        assert expected_solar_peak_utc_hour(-4.0) == 16.0
+
+    def test_utc_site_expects_noon(self) -> None:
+        assert expected_solar_peak_utc_hour(0.0) == 12.0
+
+    def test_wraps_around_midnight(self) -> None:
+        """A UTC+13 site's local noon is 23:00 UTC the previous day."""
+        assert expected_solar_peak_utc_hour(13.0) == 23.0
+
+
+class TestDiurnalAlignment:
+    def test_correct_alignment_passes(self) -> None:
+        df = _synthetic_diurnal_frame(peak_utc_hour=16)
+        peak = validate_diurnal_alignment(
+            df, utc_offset_hours=-4.0, tolerance_hours=2.0,
+        )
+        assert peak == 16.0
+
+    def test_one_bin_early_still_passes(self) -> None:
+        """Real data peaks at 15:00 UTC — solar noon is 15.83 UTC."""
+        df = _synthetic_diurnal_frame(peak_utc_hour=15)
+        validate_diurnal_alignment(
+            df, utc_offset_hours=-4.0, tolerance_hours=2.0,
+        )
+
+    def test_karaganda_profile_fails(self) -> None:
+        """The pre-fix configuration peaked at 07:00 UTC — must raise."""
+        df = _synthetic_diurnal_frame(peak_utc_hour=7)
+        with pytest.raises(ValueError, match="Diurnal alignment check FAILED"):
+            validate_diurnal_alignment(
+                df, utc_offset_hours=-4.0, tolerance_hours=2.0,
+            )
+
+    def test_local_solar_time_response_fails(self) -> None:
+        """An LST response peaks at 12:00 UTC — 4 h off, must raise."""
+        df = _synthetic_diurnal_frame(peak_utc_hour=12)
+        with pytest.raises(ValueError, match="Diurnal alignment check FAILED"):
+            validate_diurnal_alignment(
+                df, utc_offset_hours=-4.0, tolerance_hours=2.0,
+            )
+
+    def test_wraparound_is_circular_not_linear(self) -> None:
+        """23:00 vs 00:00 is a 1 h gap, not 23 h."""
+        df = _synthetic_diurnal_frame(peak_utc_hour=23)
+        validate_diurnal_alignment(
+            df, utc_offset_hours=12.0, tolerance_hours=2.0,
+        )
+
+    def test_all_nan_raises(self) -> None:
+        df = _synthetic_diurnal_frame(peak_utc_hour=16)
+        df["solar_radiation"] = np.nan
+        with pytest.raises(ValueError, match="no non-NaN values"):
+            validate_diurnal_alignment(df, utc_offset_hours=-4.0)
+
+    def test_missing_column_raises(self) -> None:
+        df = _synthetic_diurnal_frame(peak_utc_hour=16).drop(
+            columns=["solar_radiation"]
+        )
+        with pytest.raises(ValueError, match="Diurnal check needs columns"):
+            validate_diurnal_alignment(df, utc_offset_hours=-4.0)
+
+
+class TestSiteConfiguration:
+    def test_coordinates_are_paraguay(self) -> None:
+        """Guard against a silent regression to the wrong hemisphere."""
+        cfg = NASAPowerConfig()
+        assert -26.0 < cfg.latitude < -24.0, "latitude must be in Paraguay"
+        assert -58.5 < cfg.longitude < -56.0, "longitude must be in Paraguay"
+
+    def test_yaml_matches_dataclass_defaults(self) -> None:
+        """configs/default.yaml must not drift from src/config.py."""
+        from src.config import build_loader_config
+
+        cfg = build_loader_config("configs/default.yaml")
+        defaults = DataLoaderConfig()
+        assert cfg.nasa_power.latitude == defaults.nasa_power.latitude
+        assert cfg.nasa_power.longitude == defaults.nasa_power.longitude
+        assert (
+            cfg.mendeley_utc_offset_hours
+            == defaults.mendeley_utc_offset_hours
+        )
+
+
 # ── Provenance ────────────────────────────────────────────────────────
 
 
@@ -246,7 +385,12 @@ class TestOfflineMode:
         config = NASAPowerConfig(parameters=["T2M"])
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        cache_file = cache_dir / "nasa_power_20220712_20220712.json"
+        # Cache filenames embed the coordinates, so derive the path from
+        # the config rather than hard-coding it.
+        cache_file = _nasa_cache_path(
+            cache_dir, "20220712", "20220712",
+            config.latitude, config.longitude,
+        )
         fake_data = {
             "properties": {
                 "parameter": {

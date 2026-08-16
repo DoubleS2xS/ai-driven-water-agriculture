@@ -184,14 +184,24 @@ class TestIrrigationPredictor:
             pd.DataFrame, pd.Series, pd.DataFrame, pd.Series
         ],
     ) -> None:
-        """evaluate() must return all four metric keys."""
+        """evaluate() must return the full imbalanced-metric set.
+
+        Widened from the original four keys when PR-AUC, the Brier score
+        and the confusion matrix became mandatory for the paper: at a
+        ~23 % positive rate, precision/recall/F1/ROC-AUC alone do not
+        characterise the classifier.
+        """
+        from src.metrics import PRIMARY_METRICS
+
         X_train, y_train, X_test, y_test = classification_data
 
         predictor = IrrigationPredictor(model_type="xgboost")
         predictor.train(X_train, y_train)
         metrics = predictor.evaluate(X_test, y_test)
 
-        assert set(metrics.keys()) == {"precision", "recall", "f1", "roc_auc"}
+        assert set(PRIMARY_METRICS) <= set(metrics)
+        assert {"tn", "fp", "fn", "tp"} <= set(metrics)
+        assert {"n", "n_positive", "positive_rate"} <= set(metrics)
 
 
 # =====================================================================
