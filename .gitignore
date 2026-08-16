@@ -50,5 +50,11 @@ flake8/
 data/raw/*.json
 !data/raw/.gitkeep
 
+# Working notes at repository root: drafts, review notes, plans, source
+# lists. Only the README and the literature review are versioned.
+/*.md
+!/README.md
+!/AIoT Precision Agriculture Review.md
+
 # Local logs
 *.log
