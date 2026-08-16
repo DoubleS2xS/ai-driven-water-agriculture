@@ -104,15 +104,16 @@ alongside every aggregate. See `data/outputs/folds.csv`.
 │       ├── irrigation_ml.py      XGBoost / LightGBM wrapper
 │       └── explanation.py        SHAP figures and instance selection
 │
-├── tests/                        298 tests
+├── tests/                        322 tests
 │   ├── test_data_loader.py       32   merge, timezone, diurnal alignment
 │   ├── test_features.py          41   causality contract, leakage guard
 │   ├── test_validation.py        31   fold ordering, preprocessing leakage
 │   ├── test_baselines.py         35   baselines and metrics
 │   ├── test_statistics.py        37   intervals, bootstrap
-│   ├── test_ablation.py          18   feature sets, shared-rows invariant
+│   ├── test_ablation.py          19   feature sets, shared-rows invariant
 │   ├── test_explanation.py       34   SHAP instance selection
-│   ├── test_export.py            29   artefacts and provenance
+│   ├── test_export.py            31   artefacts and provenance
+│   ├── test_robustness_experiment.py 21  separation, fair comparison
 │   ├── test_models.py            12   predictor API
 │   ├── test_data_corruption.py   16   drift/missingness injection
 │   └── test_data_healing.py      13   imputation and compensation
@@ -142,7 +143,7 @@ pip install -r requirements.txt
 python -m src.data_loader --config configs/default.yaml   # rebuild dataset
 python -m src.evaluate_pipeline                           # main experiment
 python -m src.robustness_experiment                       # robustness study
-pytest -q                                                 # 298 tests
+pytest -q                                                 # 322 tests
 ```
 
 Useful flags for `evaluate_pipeline`:
@@ -264,30 +265,7 @@ module's docstring for the measured outcome and its caveats.
 
 ---
 
-# 13. Citation
-
-```bibtex
-@mastersthesis{shaya_water_management_2026,
-  author       = {Your Name and Shaya, Ibrahim},
-  title        = {Forecasting Irrigation Events from Soil-Moisture History:
-                  A Reproducible Benchmark with Explainable Models},
-  school       = {Department of Technologies and Information Systems},
-  year         = {2026},
-  address      = {Karaganda, Kazakhstan},
-  month        = {June}
-}
-```
-
----
-
-# 14. License
+# 13. License
 
 See `LICENCE`. The Mendeley dataset is CC BY 4.0; NASA POWER data are
 public domain.
-
----
-
-# 15. Acknowledgments
-
-Developed as part of a Master's thesis under the supervision of
-**Professor Ibrahim Shaya**.
