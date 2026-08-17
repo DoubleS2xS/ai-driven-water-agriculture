@@ -144,6 +144,37 @@ def find_episodes(
     return episodes
 
 
+def episode_labels(target: pd.Series) -> pd.Series:
+    """Label each irrigating hour with the episode it belongs to.
+
+    Needed to ask how *concentrated* a fold's positive hours are: two
+    folds with the same positive rate are very different problems if one
+    spreads its positives over twenty short episodes and the other draws
+    them all from a single 117-hour run.
+
+    Labels are assigned on the **full hourly grid**, so they remain
+    comparable after rows are dropped from the design matrix — an episode
+    keeps its identity even when some of its hours have incomplete lag
+    features.
+
+    Args:
+        target: Binary irrigation series on a uniform hourly grid.
+
+    Returns:
+        Float Series aligned to *target*: a 0-based episode index on
+        irrigating hours, NaN elsewhere.  Float rather than integer
+        because NaN has no integer representation.
+    """
+    series = pd.Series(target)
+    labels = pd.Series(np.nan, index=series.index, dtype=float)
+
+    for episode_id, row in find_episodes(series).iterrows():
+        start, end = int(row["start_index"]), int(row["end_index"])
+        labels.iloc[start:end + 1] = float(episode_id)
+
+    return labels
+
+
 def describe_episodes(
     target: pd.Series,
     timestamps: Optional[pd.Series] = None,

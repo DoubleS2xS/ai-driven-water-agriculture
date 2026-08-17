@@ -485,8 +485,13 @@ def export_all(
     dataset_end: str,
     loader_config: Any = None,
     episodes: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Path]:
     """Write every artefact and return the paths.
+
+    Args:
+        extra: Additional blocks merged into ``run_metadata.json`` — for
+            instance the episode-dominance rule and the folds it excludes.
 
     Returns:
         Mapping of artefact name to the path written.
@@ -517,6 +522,7 @@ def export_all(
             dataset_end=dataset_end,
             loader_config=loader_config,
             episodes=episodes,
+            extra=extra,
         ),
     }
     logger.info("Exported %d artefacts to %s/", len(paths), output_dir)

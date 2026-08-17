@@ -335,7 +335,8 @@ def run_onset_protocol(
     validation_config: ValidationConfig | None = None,
     seed: int = 42,
     metric: str = "pr_auc",
-) -> Tuple[pd.DataFrame, Path]:
+    episode_labels_by_timestamp: Optional[pd.Series] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Path]:
     """Run the whole onset protocol and export its table.
 
     Args:
@@ -345,19 +346,36 @@ def run_onset_protocol(
         validation_config: Fold settings.
         seed: Random seed.
         metric: Metric highlighted in the printed report.
+        episode_labels_by_timestamp: Episode label per hour, indexed by
+            UTC timestamp.  When given, the fold table gains the
+            episode-dominance columns, so the onset protocol can be
+            subjected to the same robustness check as the main task.
 
     Returns:
-        ``(summary, path)``.
+        ``(summary, per_fold_results, fold_table, path)``.  The per-fold
+        results are returned rather than only the aggregate, because the
+        sensitivity analysis needs to recompute means over a subset of
+        folds.
     """
     validation_config = validation_config or ValidationConfig()
 
     X, y, timestamps, _blocks = build_onset_design_matrix(df, feature_config)
     splits = rolling_origin_splits(len(X), validation_config)
-    fold_table = describe_folds(splits, y, timestamps, validation_config)
+
+    fold_labels = None
+    if episode_labels_by_timestamp is not None:
+        fold_labels = episode_labels_by_timestamp.reindex(
+            pd.to_datetime(timestamps)
+        ).to_numpy()
+
+    fold_table = describe_folds(
+        splits, y, timestamps, validation_config,
+        episode_labels=fold_labels,
+    )
 
     results = evaluate_onset(X, y, splits, seed=seed)
     summary = summarise_onset(results)
 
     print_onset_results(summary, fold_table, y, metric=metric)
     path = write_onset_results(summary, output_dir)
-    return summary, path
+    return summary, results, fold_table, path

@@ -161,17 +161,65 @@ def chronological_holdout_split(
 # Fold reporting
 # ======================================================================
 
+def episode_dominance(labels_test: np.ndarray) -> tuple[float, float, int]:
+    """Return how concentrated a test block's irrigation is in one episode.
+
+    Defined as the largest share of the block's *irrigating hours* that
+    comes from a single episode::
+
+        dominance = max_e |hours from episode e| / |irrigating hours|
+
+    A block covering one continuous episode scores 1.0; a block spreading
+    its irrigation over many short episodes scores near
+    ``1 / n_episodes``.
+
+    Computed from the episode labelling alone, so it describes the
+    **period** rather than any particular target.  That keeps one
+    criterion valid across protocols: for the onset target every positive
+    belongs to a different episode by construction, so a rule counting
+    onsets would be vacuous, while a rule counting irrigating hours in
+    the same period is not.
+
+    Parameters
+    ----------
+    labels_test : np.ndarray
+        Episode label per row of the test block, from
+        :func:`src.features.episode_labels`; NaN on non-irrigating hours.
+
+    Returns
+    -------
+    dominance : float
+        Share in ``(0, 1]``, or NaN when the block contains no irrigating
+        hour — undefined rather than zero, since there is no mass to
+        concentrate.
+    largest_episode_hours : float
+        Hours contributed by the dominant episode.
+    n_episodes : int
+        Distinct episodes represented in the block.
+    """
+    labels = np.asarray(labels_test, dtype=float)
+    labels = labels[np.isfinite(labels)]
+    if labels.size == 0:
+        return float("nan"), float("nan"), 0
+
+    _unique, counts = np.unique(labels, return_counts=True)
+    largest = int(counts.max())
+    return largest / labels.size, float(largest), int(len(_unique))
+
+
 def describe_folds(
     splits: Sequence[Split],
     y: pd.Series,
     timestamps: pd.Series | None = None,
     config: ValidationConfig | None = None,
+    episode_labels: pd.Series | np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """Summarise each fold's size, period and class balance.
+    """Summarise each fold's size, period, class balance and concentration.
 
-    Produces the fold table for the paper's methods section and flags
-    folds whose test block holds too few positives for AUC-style metrics
-    to be stable.
+    Produces the fold table for the paper's methods section, flags folds
+    whose test block holds too few positives for AUC-style metrics to be
+    stable, and — when *episode_labels* is supplied — measures how far
+    each block's positives come from a single irrigation episode.
 
     Parameters
     ----------
@@ -183,8 +231,14 @@ def describe_folds(
         UTC timestamps aligned to the design matrix.  When given, the
         covered period of each block is reported.
     config : ValidationConfig, optional
-        Supplies
-        :attr:`~src.config.ValidationConfig.min_test_positives`.
+        Supplies :attr:`~src.config.ValidationConfig.min_test_positives`
+        and
+        :attr:`~src.config.ValidationConfig.episode_dominance_threshold`.
+    episode_labels : pd.Series or np.ndarray, optional
+        Episode label per design-matrix row, from
+        :func:`src.features.episode_labels`.  When given, adds
+        ``episode_dominance``, ``largest_episode_hours``,
+        ``n_test_episodes`` and ``episode_dominated``.
 
     Returns
     -------
@@ -193,6 +247,10 @@ def describe_folds(
     """
     cfg = config or ValidationConfig()
     y_arr = np.asarray(y)
+    labels_arr = (
+        np.asarray(episode_labels, dtype=float)
+        if episode_labels is not None else None
+    )
 
     rows = []
     for i, (train_idx, test_idx) in enumerate(splits, start=1):
@@ -214,6 +272,18 @@ def describe_folds(
                 and n_pos_train >= cfg.min_test_positives
             ),
         }
+        if labels_arr is not None:
+            dominance, largest, n_eps = episode_dominance(
+                labels_arr[test_idx],
+            )
+            row["episode_dominance"] = dominance
+            row["largest_episode_hours"] = largest
+            row["n_test_episodes"] = n_eps
+            row["episode_dominated"] = bool(
+                np.isfinite(dominance)
+                and dominance > cfg.episode_dominance_threshold
+            )
+
         if timestamps is not None:
             ts = pd.to_datetime(pd.Series(timestamps).reset_index(drop=True))
             row["train_start"] = ts.iloc[train_idx[0]]
@@ -250,7 +320,28 @@ def describe_folds(
             table["test_positive_rate"].max(),
             spread,
         )
+
+    if "episode_dominated" in table.columns:
+        dominated = table.loc[table["episode_dominated"], "fold"].tolist()
+        if dominated:
+            logger.warning(
+                "Folds %s are dominated by a single irrigation episode "
+                "(> %.0f%% of their positive test hours come from one "
+                "episode). Predicting the interior of one long episode is "
+                "close to predicting persistence, so these folds inflate "
+                "aggregate scores. Report metrics with and without them.",
+                dominated, cfg.episode_dominance_threshold * 100,
+            )
     return table
+
+
+def dominated_folds(fold_table: pd.DataFrame) -> List[int]:
+    """Return the fold numbers flagged as episode-dominated."""
+    if "episode_dominated" not in fold_table.columns:
+        return []
+    return [
+        int(f) for f in fold_table.loc[fold_table["episode_dominated"], "fold"]
+    ]
 
 
 # ======================================================================

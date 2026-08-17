@@ -97,6 +97,7 @@ alongside every aggregate. See `data/outputs/folds.csv`.
 │   ├── baselines.py              the four reference models
 │   ├── tuning.py                 nested CV for hyperparameter selection
 │   ├── onset.py                  irrigation-onset protocol
+│   ├── sensitivity.py            per-fold export, episode-dominance check
 │   ├── export.py                 result artefacts and run provenance
 │   ├── evaluate_pipeline.py      main experiment
 │   ├── robustness_experiment.py  corruption/healing study (separate)
@@ -106,8 +107,9 @@ alongside every aggregate. See `data/outputs/folds.csv`.
 │       ├── irrigation_ml.py      XGBoost / LightGBM wrapper
 │       └── explanation.py        SHAP figures and instance selection
 │
-├── tests/                        376 tests
+├── tests/                        416 tests
 │   ├── test_features.py          41   causality contract, leakage guard
+│   ├── test_sensitivity.py       39   episode dominance, subset aggregates
 │   ├── test_baselines.py         37   baselines and metrics
 │   ├── test_statistics.py        37   intervals, bootstrap
 │   ├── test_explanation.py       34   SHAP instance selection
@@ -147,7 +149,7 @@ pip install -r requirements.txt
 python -m src.data_loader --config configs/default.yaml   # rebuild dataset
 python -m src.evaluate_pipeline                           # main experiment
 python -m src.robustness_experiment                       # robustness study
-pytest -q                                                 # 376 tests
+pytest -q                                                 # 416 tests
 ```
 
 Useful flags for `evaluate_pipeline`:
@@ -194,10 +196,12 @@ Numbers live in `data/outputs/`, regenerated on every run:
 | `baselines.csv` | baselines with no-skill reference and gap to the best main model |
 | `ablation.csv` | feature set × model × metric |
 | `feature_importance.csv` | mean \|SHAP\| per feature, ranked, tagged by block |
-| `folds.csv` | fold periods, sizes, class balance |
+| `folds.csv` | fold periods, sizes, class balance, episode dominance |
 | `model_comparison.json` | paired bootstrap: difference, CI, p-value |
 | `nested_cv.csv` | hyperparameters selected per outer fold, inner and outer scores |
 | `onset_results.csv` | onset protocol: model × metric, with folds actually scored |
+| `per_fold_metrics.csv` | every protocol × model × fold, all metrics, fold size and balance |
+| `sensitivity_summary.csv` | means and intervals with and without episode-dominated folds |
 | `run_metadata.json` | library versions, git commit, dataset shape, site, episode structure |
 
 Headline findings, all reproducible from those files:
@@ -218,10 +222,53 @@ Headline findings, all reproducible from those files:
 5. Predicting **when irrigation starts** is much harder than predicting
    whether it is ongoing, but still well above chance: PR-AUC 0.385
    against a no-skill 0.045. The threshold baseline leads here too.
+6. One 117-hour episode supplies 37.7 % of all positive hours and falls
+   inside a single fold, inflating every model's PR-AUC by roughly 0.10.
+   Excluding that fold by a **data-driven rule** lowers the absolute
+   numbers but **preserves the model ranking** — see §9.
 
 ---
 
-# 9. Feature ablation
+# 9. Robustness to an episode-dominated fold
+
+One irrigation episode runs for 117 consecutive hours and supplies 37.7 %
+of all positive hours in the design matrix. It falls almost entirely
+inside one rolling-origin fold, whose test block is 79.8 % positive and
+where both gradient-boosted models reach a PR-AUC of 1.000.
+
+Predicting the interior of one long episode is close to predicting
+persistence, so that fold is excluded and the aggregates reported twice.
+
+**The exclusion rule is data-driven, not chosen after seeing the results.**
+A fold is excluded when more than
+`episode_dominance_threshold` (default 0.5) of its irrigating test hours
+come from a single episode. The measure is computed from the episode
+labelling alone, so it describes the period rather than any target, and it
+is stated before any model is fitted. Observed dominance:
+
+| Fold | Episodes | Largest | Dominance | Excluded |
+|-----:|---------:|--------:|----------:|:---------|
+| 1 | 5 | 2 h | 0.286 | no |
+| 2 | 9 | 9 h | 0.360 | no |
+| 3 | 14 | 12 h | 0.308 | no |
+| 4 | 3 | 117 h | **0.672** | **yes** |
+| 5 | 15 | 15 h | 0.259 | no |
+
+The separation is wide, not borderline. Excluding fold 4 lowers PR-AUC by
+0.075–0.113 across models but **does not change the ranking**, so the
+all-folds figures may be quoted provided the inflation is stated.
+
+Exclusions are applied **per protocol**, because fold numbers index
+different periods when the row sets differ: the onset protocol splits
+1 003 eligible hours rather than 1 313, and has *no* dominated fold —
+restricting to hours with the valve closed already removes the interior of
+the long episode.
+
+Tables: `folds.csv`, `per_fold_metrics.csv`, `sensitivity_summary.csv`.
+
+---
+
+# 10. Feature ablation
 
 | Set | Features | Purpose |
 |:--|:--|:--|
@@ -237,7 +284,7 @@ different warm-up period and confound features with sample size.
 
 ---
 
-# 10. Onset protocol — predicting *when* irrigation starts
+# 11. Onset protocol — predicting *when* irrigation starts
 
 The main target is dominated by continuation: `irrigation_event(t-1)`
 alone correlates with it at r = 0.81, so a model can score well having
@@ -259,7 +306,7 @@ positives each and intervals are wide. Results: `onset_results.csv`.
 
 ---
 
-# 11. Nested cross-validation
+# 12. Nested cross-validation
 
 The threshold baseline is fitted on every training fold while the tree
 models ran at library defaults — a fair objection to the headline
@@ -274,7 +321,7 @@ model than a late one with 252. Results: `nested_cv.csv`.
 
 ---
 
-# 12. Explainability outputs
+# 13. Explainability outputs
 
 Generated in `data/outputs/`:
 
@@ -295,7 +342,7 @@ be near the bottom of a given fold's training range.
 
 ---
 
-# 13. Robustness study
+# 14. Robustness study
 
 `src/robustness_experiment.py` — sensor-drift and packet-loss injection
 with MICE imputation and drift compensation. Reported as a robustness
@@ -305,7 +352,7 @@ module's docstring for the measured outcome and its caveats.
 
 ---
 
-# 14. Reproducibility
+# 15. Reproducibility
 
 * Fixed seeds; every model deterministic.
 * NASA POWER responses cached under `data/raw/`, with the coordinates in
@@ -318,7 +365,7 @@ module's docstring for the measured outcome and its caveats.
 
 ---
 
-# 15. License
+# 16. License
 
 See `LICENCE`. The Mendeley dataset is CC BY 4.0; NASA POWER data are
 public domain.

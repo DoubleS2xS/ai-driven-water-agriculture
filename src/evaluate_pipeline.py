@@ -61,6 +61,8 @@ from src.export import export_all
 from src.features import (
     BLOCK_CALENDAR,
     describe_episodes,
+    episode_labels,
+    find_episodes,
     BLOCK_IRRIGATION,
     BLOCK_MOISTURE,
     BLOCK_ORDER,
@@ -87,8 +89,17 @@ from src.tuning import (
     print_nested_cv,
     summarise_nested_cv,
 )
+from src.sensitivity import (
+    collect_per_fold_metrics,
+    dominance_metadata,
+    print_sensitivity,
+    sensitivity_summary,
+    write_per_fold_metrics,
+    write_sensitivity_summary,
+)
 from src.validation import (
     assert_splits_are_ordered,
+    dominated_folds,
     chronological_holdout_split,
     describe_folds,
     rolling_origin_splits,
@@ -1236,9 +1247,24 @@ def main() -> None:
     metrics = PRIMARY_METRICS
     seeds = tuple(range(args.n_seeds))
 
+    # ── Episode labelling, for the dominance diagnostic ───────────────
+    # Labels are assigned on the full hourly grid so an episode keeps its
+    # identity even where the design matrix dropped some of its hours,
+    # then mapped onto the design matrix by timestamp.
+    labels_full = episode_labels(df["irrigation_event"])
+    labels_by_timestamp = pd.Series(
+        labels_full.to_numpy(), index=pd.to_datetime(df["timestamp"]),
+    )
+    fold_labels = labels_by_timestamp.reindex(
+        pd.to_datetime(timestamps)
+    ).to_numpy()
+
     # ── Primary: rolling-origin CV, repeated across seeds ─────────────
     splits = rolling_origin_splits(len(X), validation_config)
-    fold_table = describe_folds(splits, y, timestamps, validation_config)
+    fold_table = describe_folds(
+        splits, y, timestamps, validation_config,
+        episode_labels=fold_labels,
+    )
     print_fold_table(fold_table)
 
     cv_results = evaluate_across_seeds(
@@ -1307,14 +1333,46 @@ def main() -> None:
         )
 
     # ── Onset protocol: predicting when irrigation starts ─────────────
+    onset_results = pd.DataFrame()
+    onset_fold_table = pd.DataFrame()
     if not args.skip_onset:
-        run_onset_protocol(
-            df,
-            output_dir=OUTPUT_DIR,
-            validation_config=validation_config,
-            seed=args.seed,
-            metric=args.compare_metric,
+        _onset_summary, onset_results, onset_fold_table, _onset_path = (
+            run_onset_protocol(
+                df,
+                output_dir=OUTPUT_DIR,
+                validation_config=validation_config,
+                seed=args.seed,
+                metric=args.compare_metric,
+                episode_labels_by_timestamp=labels_by_timestamp,
+            )
         )
+
+    # ── Robustness to the episode-dominated fold ──────────────────────
+    excluded = dominated_folds(fold_table)
+    protocols: Dict[str, pd.DataFrame] = {
+        "main": cv_results[cv_results["seed"] == seeds[0]],
+    }
+    # Fold numbers are protocol-specific: the onset protocol splits 1 003
+    # eligible hours, not 1 313, so its fold k covers a different period.
+    # Each protocol therefore contributes its own dominated folds.
+    excluded_by_protocol: Dict[str, List[int]] = {
+        "main": excluded,
+        # Nested CV reuses the main splits exactly.
+        "nested_cv": excluded,
+    }
+    if not onset_results.empty:
+        protocols["onset"] = onset_results
+        excluded_by_protocol["onset"] = dominated_folds(onset_fold_table)
+    if not nested_results.empty:
+        protocols["nested_cv"] = nested_results
+
+    per_fold_metrics = collect_per_fold_metrics(protocols)
+    sensitivity = sensitivity_summary(protocols, excluded_by_protocol)
+    print_sensitivity(
+        sensitivity, fold_table, excluded,
+        metric=args.compare_metric,
+        threshold=validation_config.episode_dominance_threshold,
+    )
 
     # ── Secondary: single chronological 80/20 split ────────────────────
     holdout = [chronological_holdout_split(len(X), validation_config)]
@@ -1353,6 +1411,26 @@ def main() -> None:
         # irrigation schedule, and the design matrix has rows removed
         # wherever a lag feature was incomplete.
         episodes=describe_episodes(df["irrigation_event"], df["timestamp"]),
+        extra={
+            "episode_dominance": dominance_metadata(
+                fold_table, excluded,
+                threshold=validation_config.episode_dominance_threshold,
+                largest_episode_hours=int(
+                    find_episodes(df["irrigation_event"])["length_hours"].max()
+                ),
+                n_positive_design_matrix=int(y.sum()),
+                n_positive_full_record=int(
+                    (df["irrigation_event"] == 1).sum()
+                ),
+            ),
+        },
+    )
+
+    paths["per_fold_metrics"] = write_per_fold_metrics(
+        per_fold_metrics, OUTPUT_DIR,
+    )
+    paths["sensitivity_summary"] = write_sensitivity_summary(
+        sensitivity, OUTPUT_DIR,
     )
 
     if not nested_results.empty:

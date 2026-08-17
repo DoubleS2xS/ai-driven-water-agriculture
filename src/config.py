@@ -276,6 +276,24 @@ class ValidationConfig:
         its metrics to be meaningful.  Folds below this threshold are
         reported but flagged, since ROC-AUC and PR-AUC become unstable
         (and F1 degenerate) on a handful of positives.
+    episode_dominance_threshold : float
+        A fold is treated as **dominated by a single irrigation episode**
+        when that share of its positive test hours belongs to one
+        episode.  Such a fold poses a much easier problem than the
+        record as a whole: predicting the interior of one long episode is
+        close to predicting persistence, and a model can reach a perfect
+        PR-AUC on it without generalising.
+
+        The criterion is deliberately a *property of the data* — the
+        concentration of positives in one episode — and not a property of
+        the results.  Dropping a fold because its metric looked
+        suspiciously high would be selection after the fact; dropping it
+        because its positives come from a single episode is a rule that
+        can be stated before any model is fitted, and applies unchanged
+        to any future dataset.
+
+        The default 0.5 means "more than half the positive hours come
+        from one episode".
     random_seeds : tuple[int, ...]
         Seeds for the repeated-run statistics.  Ten runs, 0…9.
     """
@@ -285,6 +303,7 @@ class ValidationConfig:
     holdout_train_fraction: float = 0.80
     gap_hours: int = 0
     min_test_positives: int = 5
+    episode_dominance_threshold: float = 0.5
     random_seeds: Tuple[int, ...] = tuple(range(10))
 
 
