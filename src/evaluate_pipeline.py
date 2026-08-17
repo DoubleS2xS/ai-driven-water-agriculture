@@ -60,6 +60,7 @@ from src.config import FeatureConfig, ValidationConfig, build_loader_config
 from src.export import export_all
 from src.features import (
     BLOCK_CALENDAR,
+    describe_episodes,
     BLOCK_IRRIGATION,
     BLOCK_MOISTURE,
     BLOCK_ORDER,
@@ -78,6 +79,14 @@ from src.statistics import (
 )
 from src.models.explanation import explain_model
 from src.models.irrigation_ml import IrrigationPredictor
+from src.onset import ONSET_RESULTS_CSV, run_onset_protocol
+from src.tuning import (
+    DEFAULT_INNER_FOLDS,
+    NESTED_CV_CSV,
+    nested_cv_evaluate,
+    print_nested_cv,
+    summarise_nested_cv,
+)
 from src.validation import (
     assert_splits_are_ordered,
     chronological_holdout_split,
@@ -1179,16 +1188,30 @@ def _parse_args() -> argparse.Namespace:
         help="Tree model to explain with SHAP (default: xgboost).",
     )
     parser.add_argument(
-        "--shap-fold", default="best", choices=("best", "last"),
+        "--shap-fold", default="last", choices=("best", "last"),
         help=(
-            "Which fold's held-out block to explain: 'best' by the "
-            "comparison metric (default), or 'last' for the block whose "
-            "class balance is closest to deployment."
+            "Which fold's held-out block to explain. 'last' (default) is "
+            "the final fold: most training history and a class balance "
+            "closest to deployment. 'best' picks the highest-scoring fold, "
+            "which on this dataset is the 80%%-positive one — near-perfect "
+            "separation there leaves almost no errors to explain."
         ),
     )
     parser.add_argument(
         "--csv", default=PROCESSED_CSV,
         help="Path to the merged hourly dataset.",
+    )
+    parser.add_argument(
+        "--inner-folds", type=int, default=DEFAULT_INNER_FOLDS,
+        help="Inner folds for nested-CV tuning (default: 3).",
+    )
+    parser.add_argument(
+        "--skip-nested-cv", action="store_true",
+        help="Skip nested-CV hyperparameter tuning (the slowest step).",
+    )
+    parser.add_argument(
+        "--skip-onset", action="store_true",
+        help="Skip the irrigation-onset protocol.",
     )
     parser.add_argument(
         "--config", default="configs/default.yaml",
@@ -1266,6 +1289,33 @@ def main() -> None:
     )
     print_shap_manifest(manifest)
 
+    # ── Nested CV: tuned hyperparameters, selection on inner folds ────
+    nested_results = pd.DataFrame()
+    if not args.skip_nested_cv:
+        nested_results = nested_cv_evaluate(
+            X, y, splits,
+            model_names=MAIN_MODELS,
+            inner_folds=args.inner_folds,
+            metric=args.compare_metric,
+            seed=args.seed,
+        )
+        print_nested_cv(
+            nested_results,
+            summarise_nested_cv(nested_results),
+            untuned=summary,
+            metric=args.compare_metric,
+        )
+
+    # ── Onset protocol: predicting when irrigation starts ─────────────
+    if not args.skip_onset:
+        run_onset_protocol(
+            df,
+            output_dir=OUTPUT_DIR,
+            validation_config=validation_config,
+            seed=args.seed,
+            metric=args.compare_metric,
+        )
+
     # ── Secondary: single chronological 80/20 split ────────────────────
     holdout = [chronological_holdout_split(len(X), validation_config)]
     holdout_results = evaluate_all_models(
@@ -1298,7 +1348,23 @@ def main() -> None:
         dataset_start=str(timestamps.iloc[0]),
         dataset_end=str(timestamps.iloc[-1]),
         loader_config=build_loader_config(args.config),
+        # Episode structure is computed on the full hourly record, not on
+        # the design matrix: episodes are a property of the physical
+        # irrigation schedule, and the design matrix has rows removed
+        # wherever a lag feature was incomplete.
+        episodes=describe_episodes(df["irrigation_event"], df["timestamp"]),
     )
+
+    if not nested_results.empty:
+        nested_path = Path(OUTPUT_DIR) / NESTED_CV_CSV
+        nested_results.to_csv(nested_path, index=False)
+        logger.info("Wrote %s (%d rows)", nested_path, len(nested_results))
+        paths["nested_cv"] = nested_path
+
+    onset_path = Path(OUTPUT_DIR) / ONSET_RESULTS_CSV
+    if onset_path.exists():
+        paths["onset_results"] = onset_path
+
     print_exported_artifacts(paths)
 
     logger.info("Evaluation complete. ✓")

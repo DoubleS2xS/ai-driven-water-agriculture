@@ -216,6 +216,27 @@ class TestLogisticRegressionBaseline:
         b = LogisticRegressionBaseline(random_state=7).fit(X, y)
         np.testing.assert_allclose(a.predict_proba(X), b.predict_proba(X))
 
+    def test_single_class_fold_falls_back_to_the_prior(self, design) -> None:
+        """Must not crash: at a 4 % onset rate this fold really occurs.
+
+        The tree models degrade to a constant on their own; sklearn's
+        LogisticRegression raises instead, which would abort the whole
+        protocol on one unlucky fold.
+        """
+        X, _y = design
+        y = pd.Series(np.zeros(len(X), dtype=int))
+        model = LogisticRegressionBaseline().fit(X, y)
+
+        assert model.degenerate_ is True
+        proba = model.predict_proba(X)
+        assert np.all(np.isfinite(proba))
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-9)
+        assert set(np.unique(model.predict(X))) == {0}
+
+    def test_two_class_fold_is_not_flagged_degenerate(self, design) -> None:
+        X, y = design
+        assert LogisticRegressionBaseline().fit(X, y).degenerate_ is False
+
 
 # ── Registry ─────────────────────────────────────────────────────────
 

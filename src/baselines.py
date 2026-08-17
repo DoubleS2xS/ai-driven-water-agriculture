@@ -271,6 +271,21 @@ class LogisticRegressionBaseline(BaseEstimator, ClassifierMixin):
     Class weights are left at their default, matching the main models, so
     that any difference is attributable to the hypothesis class rather
     than to a different treatment of the imbalance.
+
+    Single-class training folds
+    --------------------------
+    ``LogisticRegression`` raises when a training fold contains only one
+    class, unlike the tree models, which fall back to a constant.  That
+    is not a hypothetical: at the ~4 % onset rate of
+    :mod:`src.onset`, an early fold's training block can legitimately
+    contain no positive example at all.  Rather than crash the whole
+    protocol, this baseline then predicts the training prior — the only
+    thing the fold supports — and records the fallback in
+    :attr:`degenerate_`.
+
+    Attributes:
+        degenerate_: ``True`` when the training fold held a single class
+            and the model fell back to the prior.
     """
 
     def __init__(self, random_state: int = 42, max_iter: int = 1000) -> None:
@@ -280,20 +295,41 @@ class LogisticRegressionBaseline(BaseEstimator, ClassifierMixin):
     def fit(
         self, X: pd.DataFrame, y: Sequence[int],
     ) -> "LogisticRegressionBaseline":
+        y_arr = np.asarray(y)
+        self.classes_ = np.array([0, 1])
+        self.degenerate_ = len(np.unique(y_arr)) < 2
+
+        if self.degenerate_:
+            self._pipeline = None
+            self._prior = float(y_arr.mean())
+            logger.warning(
+                "LogisticRegressionBaseline: training fold contains a single "
+                "class (%d rows, %d positive). Falling back to the constant "
+                "training prior %.4f; no coefficients can be estimated.",
+                len(y_arr), int(y_arr.sum()), self._prior,
+            )
+            return self
+
         self._pipeline = build_model_pipeline(
             "logistic",
             LogisticRegression(
                 max_iter=self.max_iter, random_state=self.random_state,
             ),
         )
-        self._pipeline.fit(X, y)
-        self.classes_ = np.array([0, 1])
+        self._pipeline.fit(X, y_arr)
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
+        if self._pipeline is None:
+            return np.full(len(X), int(self._prior > 0.5), dtype=int)
         return np.asarray(self._pipeline.predict(X))
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        if self._pipeline is None:
+            p = np.clip(self._prior, _PROBA_FLOOR, _PROBA_CEIL)
+            return np.column_stack(
+                [np.full(len(X), 1 - p), np.full(len(X), p)]
+            )
         return np.asarray(self._pipeline.predict_proba(X))
 
 

@@ -95,6 +95,8 @@ alongside every aggregate. See `data/outputs/folds.csv`.
 │   ├── metrics.py                imbalanced-classification metric set
 │   ├── statistics.py             confidence intervals, paired bootstrap
 │   ├── baselines.py              the four reference models
+│   ├── tuning.py                 nested CV for hyperparameter selection
+│   ├── onset.py                  irrigation-onset protocol
 │   ├── export.py                 result artefacts and run provenance
 │   ├── evaluate_pipeline.py      main experiment
 │   ├── robustness_experiment.py  corruption/healing study (separate)
@@ -104,19 +106,21 @@ alongside every aggregate. See `data/outputs/folds.csv`.
 │       ├── irrigation_ml.py      XGBoost / LightGBM wrapper
 │       └── explanation.py        SHAP figures and instance selection
 │
-├── tests/                        322 tests
-│   ├── test_data_loader.py       32   merge, timezone, diurnal alignment
+├── tests/                        376 tests
 │   ├── test_features.py          41   causality contract, leakage guard
-│   ├── test_validation.py        31   fold ordering, preprocessing leakage
-│   ├── test_baselines.py         35   baselines and metrics
+│   ├── test_baselines.py         37   baselines and metrics
 │   ├── test_statistics.py        37   intervals, bootstrap
-│   ├── test_ablation.py          19   feature sets, shared-rows invariant
 │   ├── test_explanation.py       34   SHAP instance selection
+│   ├── test_data_loader.py       32   merge, timezone, diurnal alignment
+│   ├── test_onset.py             32   episodes, onset target, restriction
+│   ├── test_validation.py        31   fold ordering, preprocessing leakage
 │   ├── test_export.py            31   artefacts and provenance
 │   ├── test_robustness_experiment.py 21  separation, fair comparison
-│   ├── test_models.py            12   predictor API
+│   ├── test_tuning.py            20   nested CV, outer-test isolation
+│   ├── test_ablation.py          19   feature sets, shared-rows invariant
 │   ├── test_data_corruption.py   16   drift/missingness injection
-│   └── test_data_healing.py      13   imputation and compensation
+│   ├── test_data_healing.py      13   imputation and compensation
+│   └── test_models.py            12   predictor API
 │
 ├── requirements.txt
 └── data_provenance.yaml
@@ -143,7 +147,7 @@ pip install -r requirements.txt
 python -m src.data_loader --config configs/default.yaml   # rebuild dataset
 python -m src.evaluate_pipeline                           # main experiment
 python -m src.robustness_experiment                       # robustness study
-pytest -q                                                 # 322 tests
+pytest -q                                                 # 376 tests
 ```
 
 Useful flags for `evaluate_pipeline`:
@@ -152,7 +156,10 @@ Useful flags for `evaluate_pipeline`:
 --n-seeds N          repeated runs (default 10)
 --bootstrap N        bootstrap iterations (default 10000)
 --compare-metric     roc_auc | pr_auc
---shap-fold          best | last
+--shap-fold          last (default) | best
+--inner-folds N      inner folds for nested-CV tuning (default 3)
+--skip-nested-cv     skip tuning (the slowest step)
+--skip-onset         skip the onset protocol
 ```
 
 ---
@@ -189,7 +196,9 @@ Numbers live in `data/outputs/`, regenerated on every run:
 | `feature_importance.csv` | mean \|SHAP\| per feature, ranked, tagged by block |
 | `folds.csv` | fold periods, sizes, class balance |
 | `model_comparison.json` | paired bootstrap: difference, CI, p-value |
-| `run_metadata.json` | library versions, git commit, dataset shape, site |
+| `nested_cv.csv` | hyperparameters selected per outer fold, inner and outer scores |
+| `onset_results.csv` | onset protocol: model × metric, with folds actually scored |
+| `run_metadata.json` | library versions, git commit, dataset shape, site, episode structure |
 
 Headline findings, all reproducible from those files:
 
@@ -198,10 +207,17 @@ Headline findings, all reproducible from those files:
    split reverses this ranking, because its test block lies entirely in
    the easy late-season regime — which is why the holdout is reported as
    a secondary result only.
-2. Weather **degrades** performance: adding the 16 meteorological features
+2. **Tuning does not change this.** Nested cross-validation, selecting on
+   inner folds of each training block only, moves PR-AUC by −0.001
+   (XGBoost) and −0.033 (LightGBM) — both still below the threshold
+   baseline's 0.700. The finding is not an artifact of library defaults.
+3. Weather **degrades** performance: adding the 16 meteorological features
    to the soil-moisture lags lowers PR-AUC (ablation A → B).
-3. The leakage control (set E, weather only) sits at chance —
+4. The leakage control (set E, weather only) sits at chance —
    ROC-AUC ≈ 0.51–0.54 against a no-skill 0.50.
+5. Predicting **when irrigation starts** is much harder than predicting
+   whether it is ongoing, but still well above chance: PR-AUC 0.385
+   against a no-skill 0.045. The threshold baseline leads here too.
 
 ---
 
@@ -221,7 +237,44 @@ different warm-up period and confound features with sample size.
 
 ---
 
-# 10. Explainability outputs
+# 10. Onset protocol — predicting *when* irrigation starts
+
+The main target is dominated by continuation: `irrigation_event(t-1)`
+alone correlates with it at r = 0.81, so a model can score well having
+learned only that what was happening a moment ago probably still is.
+
+`src/onset.py` targets the decision a controller actually makes:
+
+``onset(t) = 1`` iff the valve is open at *t* and was closed at *t − 1*.
+
+Evaluation is restricted to hours where the valve **was closed**, since
+an onset is impossible otherwise and keeping those rows would pad the
+negative class with free correct answers. Two consequences are handled
+explicitly: `irrigation_event_lag1h` becomes constant and is dropped, and
+the persistence baseline degenerates into the majority baseline and is
+excluded rather than reported twice.
+
+Roughly 4.5 % of eligible hours are onsets, so folds hold a handful of
+positives each and intervals are wide. Results: `onset_results.csv`.
+
+---
+
+# 11. Nested cross-validation
+
+The threshold baseline is fitted on every training fold while the tree
+models ran at library defaults — a fair objection to the headline
+comparison. `src/tuning.py` removes it: each outer training fold is split
+again, a small grid is scored on those **inner** folds only, and the
+winner is refitted on the whole outer training fold before the outer test
+block is touched once.
+
+Selected parameters differ between folds, which is information rather than
+noise — an early fold with 7 positive examples supports a much smaller
+model than a late one with 252. Results: `nested_cv.csv`.
+
+---
+
+# 12. Explainability outputs
 
 Generated in `data/outputs/`:
 
@@ -242,7 +295,7 @@ be near the bottom of a given fold's training range.
 
 ---
 
-# 11. Robustness study
+# 13. Robustness study
 
 `src/robustness_experiment.py` — sensor-drift and packet-loss injection
 with MICE imputation and drift compensation. Reported as a robustness
@@ -252,7 +305,7 @@ module's docstring for the measured outcome and its caveats.
 
 ---
 
-# 12. Reproducibility
+# 14. Reproducibility
 
 * Fixed seeds; every model deterministic.
 * NASA POWER responses cached under `data/raw/`, with the coordinates in
@@ -265,7 +318,7 @@ module's docstring for the measured outcome and its caveats.
 
 ---
 
-# 13. License
+# 15. License
 
 See `LICENCE`. The Mendeley dataset is CC BY 4.0; NASA POWER data are
 public domain.

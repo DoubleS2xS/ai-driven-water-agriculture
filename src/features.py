@@ -56,7 +56,7 @@ in a feature set.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -78,6 +78,171 @@ BLOCK_ORDER: Tuple[str, ...] = (
 
 #: Rolling statistics emitted for the soil-moisture block.
 _ROLLING_STATS: Tuple[str, ...] = ("mean", "min", "max", "std")
+
+
+# ======================================================================
+# Episode structure
+# ======================================================================
+
+def find_episodes(
+    target: pd.Series,
+    timestamps: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    """Locate contiguous runs of irrigation in the hourly record.
+
+    An *episode* is a maximal run of consecutive hours with the valve
+    open.  Episodes, not individual hours, are what an irrigation
+    schedule consists of, so their count and duration describe the target
+    far better than a positive rate does: 23.6 % of hours positive is
+    consistent both with continuous trickle irrigation and with a handful
+    of multi-day floods, and the two call for different models.
+
+    Missing relay readings are treated as **breaks**, not as
+    continuations.  An episode that actually spanned a data gap is
+    therefore counted as two, which understates duration and overstates
+    count.  The alternative — bridging gaps — would invent irrigation
+    that was never recorded.  Callers should report the number of unknown
+    hours alongside these figures; :func:`describe_episodes` does.
+
+    Args:
+        target: Binary irrigation series on a uniform hourly grid, in
+            time order.  NaN marks an unknown hour.
+        timestamps: Optional aligned timestamps, used to report when each
+            episode began and ended.
+
+    Returns:
+        One row per episode with ``start_index``, ``end_index``,
+        ``length_hours`` and, when *timestamps* is given, ``start_time``
+        and ``end_time``.  Empty if the record contains no irrigation.
+    """
+    values = pd.Series(target).to_numpy(dtype=float)
+    is_on = values == 1.0
+
+    if not is_on.any():
+        return pd.DataFrame(
+            columns=["start_index", "end_index", "length_hours"]
+        )
+
+    # Pad with False so runs starting at row 0 or ending at the last row
+    # are detected by the same difference operation.
+    padded = np.concatenate([[False], is_on, [False]])
+    edges = np.diff(padded.astype(int))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1) - 1
+
+    episodes = pd.DataFrame({
+        "start_index": starts,
+        "end_index": ends,
+        "length_hours": ends - starts + 1,
+    })
+
+    if timestamps is not None:
+        stamps = pd.to_datetime(pd.Series(timestamps).reset_index(drop=True))
+        episodes["start_time"] = stamps.iloc[starts].to_numpy()
+        episodes["end_time"] = stamps.iloc[ends].to_numpy()
+
+    return episodes
+
+
+def describe_episodes(
+    target: pd.Series,
+    timestamps: Optional[pd.Series] = None,
+    *,
+    histogram_bins: Sequence[int] = (1, 2, 3, 6, 12, 24, 48, 96),
+) -> Dict[str, object]:
+    """Summarise the episode structure for the run's metadata.
+
+    Args:
+        target: Binary irrigation series on a uniform hourly grid.
+        timestamps: Optional aligned timestamps.
+        histogram_bins: Left edges of the duration histogram, in hours.
+            The final bin is open-ended.
+
+    Returns:
+        JSON-serialisable mapping with the episode count, duration
+        quantiles, a duration histogram, and the number of unknown hours
+        that limit how precisely episodes can be delimited.
+    """
+    series = pd.Series(target)
+    episodes = find_episodes(series, timestamps)
+    lengths = episodes["length_hours"].to_numpy() if len(episodes) else np.array([])
+
+    summary: Dict[str, object] = {
+        "n_episodes": int(len(episodes)),
+        "n_irrigating_hours": int((series == 1.0).sum()),
+        "n_unknown_hours": int(series.isna().sum()),
+        "note": (
+            "An episode is a maximal run of consecutive irrigating hours. "
+            "Unknown relay hours break a run rather than bridging it, so an "
+            "episode spanning a data gap is counted as two: the count is an "
+            "upper bound and the durations a lower bound."
+        ),
+    }
+
+    if len(lengths) == 0:
+        summary["duration_hours"] = None
+        summary["duration_histogram_hours"] = {}
+        return summary
+
+    summary["duration_hours"] = {
+        "min": int(lengths.min()),
+        "q25": float(np.quantile(lengths, 0.25)),
+        "median": float(np.median(lengths)),
+        "q75": float(np.quantile(lengths, 0.75)),
+        "max": int(lengths.max()),
+        "mean": float(lengths.mean()),
+        "std": float(lengths.std(ddof=1)) if len(lengths) > 1 else 0.0,
+        "total": int(lengths.sum()),
+    }
+
+    edges = list(histogram_bins)
+    histogram: Dict[str, int] = {}
+    for i, low in enumerate(edges):
+        if i + 1 < len(edges):
+            high = edges[i + 1]
+            count = int(((lengths >= low) & (lengths < high)).sum())
+            label = f"{low}" if high == low + 1 else f"{low}-{high - 1}"
+        else:
+            count = int((lengths >= low).sum())
+            label = f"{low}+"
+        histogram[label] = count
+    summary["duration_histogram_hours"] = histogram
+
+    return summary
+
+
+def irrigation_onset(
+    target: pd.Series,
+    config: FeatureConfig | None = None,
+) -> pd.Series:
+    """Mark the first hour of each irrigation episode.
+
+    ``onset(t) = 1`` when the valve is open at *t* and was closed at
+    *t − 1*.  This is the decision an irrigation controller actually
+    makes; the hours that follow are continuations of a decision already
+    taken.
+
+    The first row is NaN, not 0: whether the record opens mid-episode is
+    unknowable, and calling it "not an onset" would assert something the
+    data does not say.
+
+    Args:
+        target: Binary irrigation series on a uniform hourly grid.
+        config: Supplies the causal shift; the previous state is read at
+            ``t − causal_shift``.
+
+    Returns:
+        Series aligned to *target* with 1 at episode starts, 0 elsewhere,
+        and NaN where the previous state is unknown.
+    """
+    cfg = config or FeatureConfig()
+    series = pd.Series(target).astype(float)
+    previous = series.shift(cfg.causal_shift)
+
+    onset = ((series == 1.0) & (previous == 0.0)).astype(float)
+    # Propagate genuine ignorance rather than defaulting to zero.
+    onset[series.isna() | previous.isna()] = np.nan
+    return onset
 
 
 # ======================================================================

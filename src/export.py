@@ -374,6 +374,7 @@ def write_run_metadata(
     dataset_start: str,
     dataset_end: str,
     loader_config: Any = None,
+    episodes: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
     filename: str = RUN_METADATA_JSON,
 ) -> Path:
@@ -390,6 +391,12 @@ def write_run_metadata(
         loader_config: Optional :class:`~src.config.DataLoaderConfig`,
             recorded so the site and timezone assumptions travel with the
             results.
+        episodes: Output of
+            :func:`src.features.describe_episodes`.  Recorded because a
+            positive rate alone does not characterise the target: 23.6 %
+            of hours positive is equally consistent with continuous
+            trickle irrigation and with a few multi-day floods, and the
+            episode count and duration spread distinguish them.
         extra: Additional fields to merge in.
         filename: Output file name.
 
@@ -419,6 +426,9 @@ def write_run_metadata(
             "validation": "rolling-origin, expanding window, no shuffle",
         },
     }
+
+    if episodes is not None:
+        metadata["episodes"] = episodes
 
     if loader_config is not None:
         metadata["site"] = {
@@ -462,6 +472,7 @@ def export_all(
     dataset_start: str,
     dataset_end: str,
     loader_config: Any = None,
+    episodes: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Path]:
     """Write every artefact and return the paths.
 
@@ -493,6 +504,7 @@ def export_all(
             dataset_start=dataset_start,
             dataset_end=dataset_end,
             loader_config=loader_config,
+            episodes=episodes,
         ),
     }
     logger.info("Exported %d artefacts to %s/", len(paths), output_dir)
