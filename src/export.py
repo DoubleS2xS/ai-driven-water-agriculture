@@ -54,6 +54,10 @@ TRACKED_PACKAGES: tuple[str, ...] = (
     "numpy", "pandas", "scipy", "sklearn", "xgboost", "lightgbm", "shap",
 )
 
+#: Directory holding the artefacts, excluded from the dirty check because
+#: the run rewrites it.
+OUTPUT_DIR_NAME: str = "data/outputs"
+
 RESULTS_SUMMARY_CSV: str = "results_summary.csv"
 BASELINES_CSV: str = "baselines.csv"
 ABLATION_CSV: str = "ablation.csv"
@@ -89,11 +93,17 @@ def git_provenance() -> Dict[str, Any]:
     """
     commit = _git("rev-parse", "HEAD")
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
-    # Tracked modifications only. Counting untracked files would make
-    # every run flag itself as dirty, since writing this very directory
-    # creates them — the flag has to describe the code that produced the
-    # results, not the artefacts they consist of.
-    tracked_changes = _git("status", "--porcelain", "--untracked-files=no")
+    # The flag answers one question: are these results reproducible from
+    # the recorded commit? That depends on the code and the input data,
+    # not on the output files — which this very run rewrites. Both
+    # exclusions below exist for the same reason, and without them every
+    # run reports itself as dirty:
+    #   --untracked-files=no  once data/outputs/ is untracked
+    #   :(exclude)data/outputs once it is tracked
+    tracked_changes = _git(
+        "status", "--porcelain", "--untracked-files=no",
+        "--", ".", f":(exclude){OUTPUT_DIR_NAME}",
+    )
     untracked = _git("ls-files", "--others", "--exclude-standard")
 
     if commit is None:
@@ -113,9 +123,11 @@ def git_provenance() -> Dict[str, Any]:
     }
     if dirty:
         provenance["note"] = (
-            "Tracked files had uncommitted modifications when these results "
-            "were produced, so they do not correspond to this commit alone "
-            "and are not reproducible from it. Commit before quoting them."
+            "Tracked files outside "
+            f"{OUTPUT_DIR_NAME}/ had uncommitted modifications when these "
+            "results were produced, so they do not correspond to this commit "
+            "alone and are not reproducible from it. Commit before quoting "
+            "them."
         )
         logger.warning(
             "Results generated from a dirty working tree (commit %s). "

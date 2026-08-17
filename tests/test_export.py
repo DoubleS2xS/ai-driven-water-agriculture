@@ -119,21 +119,45 @@ class TestProvenance:
         if provenance["dirty"]:
             assert "not reproducible" in provenance["note"]
 
-    def test_dirty_ignores_untracked_files(self) -> None:
+    def test_dirty_ignores_the_output_directory(self) -> None:
         """Otherwise every run flags itself dirty.
 
-        The run writes data/outputs/, so if those files are untracked
-        they appear in `git status --porcelain` and the flag would be
-        true on every clean checkout — describing the artefacts instead
-        of the code that produced them.
+        The run rewrites data/outputs/. While those files are untracked
+        they show up as untracked; once committed they show up as
+        modified. Either way, counting them would make the flag describe
+        the artefacts rather than the code that produced them, and it
+        would be true on every clean checkout.
         """
         import subprocess
 
+        from src.export import OUTPUT_DIR_NAME
+
         tracked = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            [
+                "git", "status", "--porcelain", "--untracked-files=no",
+                "--", ".", f":(exclude){OUTPUT_DIR_NAME}",
+            ],
             capture_output=True, text=True, check=False,
         ).stdout.strip()
         assert git_provenance()["dirty"] == bool(tracked)
+
+    def test_output_directory_churn_alone_is_not_dirty(self) -> None:
+        """Rewriting an artefact must not flip the flag."""
+        import subprocess
+
+        from src.export import OUTPUT_DIR_NAME
+
+        all_tracked = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip().splitlines()
+        outside = [
+            line for line in all_tracked
+            if OUTPUT_DIR_NAME not in line
+        ]
+        # If the only modifications are artefacts, dirty must be False.
+        if all_tracked and not outside:
+            assert git_provenance()["dirty"] is False
 
     def test_untracked_count_is_reported_separately(self) -> None:
         """Hidden, not ignored: the count is still recorded."""
