@@ -1,10 +1,10 @@
 {
-  "generated_utc": "2026-08-16T16:27:59+00:00",
+  "generated_utc": "2026-08-17T13:37:43+00:00",
   "git": {
-    "commit": "050a8256d4612bbdff671cc293d127cb625e8fed",
+    "commit": "6a57486ca80fcd42aaa41586591e3f3211da4632",
     "branch": "main",
     "dirty": false,
-    "untracked_files": 20
+    "untracked_files": 3
   },
   "environment": {
     "platform": "macOS-14.4.1-arm64-arm-64bit",
@@ -42,6 +42,32 @@
     "n_seeds": 10,
     "n_folds": 5,
     "validation": "rolling-origin, expanding window, no shuffle"
+  },
+  "episodes": {
+    "n_episodes": 52,
+    "n_irrigating_hours": 333,
+    "n_unknown_hours": 137,
+    "note": "An episode is a maximal run of consecutive irrigating hours. Unknown relay hours break a run rather than bridging it, so an episode spanning a data gap is counted as two: the count is an upper bound and the durations a lower bound.",
+    "duration_hours": {
+      "min": 1,
+      "q25": 1.0,
+      "median": 2.0,
+      "q75": 3.0,
+      "max": 117,
+      "mean": 6.403846153846154,
+      "std": 17.674907011303347,
+      "total": 333
+    },
+    "duration_histogram_hours": {
+      "1": 14,
+      "2": 24,
+      "3-5": 7,
+      "6-11": 3,
+      "12-23": 1,
+      "24-47": 2,
+      "48-95": 0,
+      "96+": 1
+    }
   },
   "site": {
     "latitude": -25.31,
