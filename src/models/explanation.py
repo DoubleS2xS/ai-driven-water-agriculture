@@ -61,10 +61,13 @@ from typing import Any, Dict, List, Optional, Sequence
 import matplotlib
 matplotlib.use("Agg")  # headless backend — must be before pyplot import
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.transforms import blended_transform_factory  # noqa: E402
 
 import numpy as np
 import pandas as pd
 import shap
+
+from src.figures import AXIS_LW, FS_ANNOT, W_DOUBLE, apply_style, bare
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,26 @@ DEFAULT_THRESHOLD: float = 0.5
 
 #: Number of features given a dependence plot.
 N_DEPENDENCE_FEATURES: int = 3
+
+#: Waterfall bar colours, drawn from the manuscript's colour-blind-safe
+#: palette rather than SHAP's default red/blue, which is neither
+#: colour-blind safe nor consistent with the other figures.
+POSITIVE_COLOUR: str = "#CC79A7"
+NEGATIVE_COLOUR: str = "#0072B2"
+
+
+def _save_figure(fig: plt.Figure, save_path: str, *, dpi: int = 300) -> None:
+    """Write the raster the pipeline expects plus a vector sibling.
+
+    The manuscript needs PDF; the pipeline's manifest and the README
+    reference PNG. Writing both from one call keeps them from drifting
+    apart, which is how figure 9 came to exist in two different styles.
+    """
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi)
+    fig.savefig(path.with_suffix(".pdf"))
+    plt.close(fig)
 
 
 @dataclass
@@ -208,6 +231,96 @@ def select_explanation_instances(
     return selections
 
 
+def _resolve_feature_medians(
+    feature_names: Sequence[str],
+    feature_values: Sequence[float],
+    feature_medians: Optional[Sequence[float] | Dict[str, float] | pd.Series] = None,
+    training_medians: Optional[Sequence[float] | Dict[str, float] | pd.Series] = None,
+) -> List[Optional[float]]:
+    """Map each rendered SHAP feature to a training-fold median value."""
+    resolved = feature_medians if feature_medians is not None else training_medians
+    if resolved is None:
+        return [None for _ in feature_names]
+
+    if isinstance(resolved, pd.Series):
+        resolved = resolved.to_dict()
+
+    if isinstance(resolved, dict):
+        return [
+            float(resolved.get(name, np.nan)) if name in resolved and not pd.isna(resolved.get(name)) else None
+            for name in feature_names
+        ]
+
+    values = np.asarray(resolved, dtype=float)
+    if len(values) != len(feature_names):
+        raise ValueError(
+            "feature_medians and feature_names must have the same length. "
+            f"Got {len(values)} medians for {len(feature_names)} features."
+        )
+    return [float(v) if not pd.isna(v) else None for v in values]
+
+
+def _format_waterfall_label(
+    feature_name: str,
+    feature_value: Any,
+    training_median: Optional[float] = None,
+) -> str:
+    """Create the per-feature row label used in the manuscript waterfall."""
+    value_text = np.format_float_positional(
+        float(feature_value), precision=3, trim="-", fractional=False,
+    )
+    label = f"{value_text} = {feature_name}"
+    if training_median is not None and not np.isnan(training_median):
+        label = f"{label}  (train median {float(training_median):.2f})"
+    return label
+
+
+def _waterfall_rows(
+    values: np.ndarray,
+    feature_names: Sequence[str],
+    feature_values: Sequence[float],
+    medians: Sequence[Optional[float]],
+    max_display: int,
+) -> tuple[List[float], List[str]]:
+    """Split contributions into the rows a waterfall draws.
+
+    The largest ``max_display`` contributors get a row each; everything
+    else is pooled into a single row.  A forty-row waterfall is
+    unreadable at column width, but simply truncating would break the
+    figure's central promise — that the bars carry ``E[f(x)]`` to
+    ``f(x)``.  Pooling keeps the sum exact, so the reader can still add
+    the bars up.
+
+    Args:
+        values: Per-feature SHAP contributions.
+        feature_names: Feature names aligned to *values*.
+        feature_values: Raw feature values aligned to *values*.
+        medians: Training-fold medians aligned to *values*, or None.
+        max_display: How many contributors to draw individually.
+
+    Returns:
+        ``(row_values, row_labels)`` whose values sum to
+        ``values.sum()``.
+    """
+    values = np.asarray(values, dtype=float)
+    order = np.argsort(np.abs(values))[::-1]
+    keep, rest = order[:max_display], order[max_display:]
+
+    row_values = [float(values[i]) for i in keep]
+    row_labels = [
+        _format_waterfall_label(
+            feature_names[i], feature_values[i], medians[i],
+        )
+        for i in keep
+    ]
+
+    if rest.size:
+        row_values.append(float(values[rest].sum()))
+        row_labels.append(f"{rest.size} other features")
+
+    return row_values, row_labels
+
+
 class SHAPExplainer:
     """SHAP-based explainability for tree-based irrigation classifiers.
 
@@ -327,18 +440,39 @@ class SHAPExplainer:
         save_path: str,
         *,
         dpi: int = 300,
+        max_display: int = 10,
+        feature_medians: Optional[Sequence[float] | Dict[str, float] | pd.Series] = None,
+        training_medians: Optional[Sequence[float] | Dict[str, float] | pd.Series] = None,
     ) -> None:
-        """Generate and save a SHAP waterfall plot for a single instance.
+        """Render a waterfall for one instance, in the manuscript style.
 
-        This is useful for explaining edge-case decisions in the
-        manuscript (e.g. "Why did the model predict irrigation ON when
-        soil moisture was 52 %?").
+        Drawn natively rather than through ``shap.waterfall_plot``, which
+        emits its own fonts, colours and figure size and so cannot be
+        matched to the other figures.
+
+        Why the training medians belong on the labels
+        ---------------------------------------------
+        A raw feature value on a waterfall is uninterpretable without the
+        distribution it came from. On this dataset the confident false
+        alarm shows ``soil_moisture_lag1h = 71.02``, which reads as "wet"
+        against the record as a whole (median 72.2) — yet it sits at the
+        **2.7th percentile of that fold's training data**, whose median is
+        72.8. The model was reacting to unusually dry soil, and a reader
+        without the fold median would conclude the opposite.
 
         Args:
-            X: Feature matrix (same data used for training / testing).
-            index: Row index of the instance to explain.
-            save_path: File path for the output PNG.
-            dpi: Resolution for publication-quality output.
+            X: Feature matrix of the block being explained.
+            index: Row offset of the instance within *X*.
+            save_path: Output path; a PDF sibling is written alongside.
+            dpi: Raster resolution.
+            max_display: Largest contributors to draw individually; the
+                remainder is pooled into one row so the bars still sum to
+                ``f(x)``.
+            feature_medians: Per-feature medians of the **training fold**,
+                shown on the y-axis labels.  Test-block medians would
+                defeat the purpose: they describe the same data the
+                instance came from.
+            training_medians: Alias for *feature_medians*.
 
         Raises:
             IndexError: If *index* is out of bounds.
@@ -358,11 +492,8 @@ class SHAPExplainer:
 
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # Use the Explanation object API for waterfall plots
         explanation = explainer(X)
 
-        # For binary classifiers, explanation may have shape
-        # (n_samples, n_features, 2).  Select class 1.
         if explanation.values.ndim == 3:
             single_explanation = shap.Explanation(
                 values=explanation.values[index, :, 1],
@@ -382,12 +513,84 @@ class SHAPExplainer:
                 feature_names=explanation.feature_names,
             )
 
-        plt.figure(figsize=(10, 6))
-        shap.waterfall_plot(single_explanation, show=False)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
-        plt.close()
+        apply_style()
+        values = np.asarray(single_explanation.values, dtype=float)
+        base_value = float(np.asarray(single_explanation.base_values).reshape(-1)[0])
+        feature_names = list(single_explanation.feature_names)
+        feature_values = np.asarray(single_explanation.data, dtype=float)
+        medians = _resolve_feature_medians(
+            feature_names,
+            feature_values,
+            feature_medians=feature_medians,
+            training_medians=training_medians,
+        )
 
+        rows_values, rows_labels = _waterfall_rows(
+            values, feature_names, feature_values, medians, max_display,
+        )
+
+        fig, ax = plt.subplots(figsize=(W_DOUBLE, 0.30 * len(rows_values) + 1.5))
+        bare(ax)
+
+        # Draw from the base value outward, in the plotted order, so the
+        # bars read as a running total ending at f(x).
+        y_pos = np.arange(len(rows_values))
+        current = base_value
+        for i, value in enumerate(rows_values):
+            left = current if value >= 0 else current + value
+            ax.barh(
+                y_pos[i], abs(value), left=left, height=0.62,
+                color=(POSITIVE_COLOUR if value >= 0 else NEGATIVE_COLOUR),
+                edgecolor="none",
+            )
+            ax.text(
+                left + abs(value) + 0.06 if value >= 0 else left - 0.06,
+                y_pos[i],
+                f"{value:+.2f}",
+                va="center",
+                ha="left" if value >= 0 else "right",
+                fontsize=FS_ANNOT,
+                color="#333333",
+            )
+            current += value
+
+        ax.axvline(base_value, color="#777777", linestyle="--",
+                   linewidth=AXIS_LW)
+        ax.axvline(current, color="#333333", linewidth=AXIS_LW)
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(rows_labels)
+        ax.invert_yaxis()
+        ax.set_xlabel("contribution to log-odds")
+        ax.set_ylabel("")
+        # A waterfall has no quantitative y axis — the rows are a
+        # categorical ordering — so the left spine would imply a scale
+        # that does not exist.
+        ax.spines["left"].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+
+        span = max(abs(current - base_value), 1.0)
+        ax.set_xlim(
+            min(base_value, current) - 0.12 * span,
+            max(base_value, current) + 0.22 * span,
+        )
+
+        # Anchor the two reference labels to the vertical rules in data
+        # coordinates but to the top of the axes in figure coordinates,
+        # so they stay visible whatever the row count.
+        at_top = blended_transform_factory(ax.transData, ax.transAxes)
+        ax.text(
+            base_value, 1.02, f"E[f(x)] = {base_value:.2f}",
+            transform=at_top, ha="center", va="bottom",
+            fontsize=FS_ANNOT, color="#777777",
+        )
+        ax.text(
+            current, 1.02, f"f(x) = {current:.2f}",
+            transform=at_top, ha="center", va="bottom",
+            fontsize=FS_ANNOT, color="#333333",
+        )
+
+        _save_figure(fig, save_path, dpi=dpi)
         logger.info("Waterfall plot saved: %s", save_path)
 
     # ── Global importance ─────────────────────────────────────────────
@@ -488,6 +691,8 @@ def explain_model(
     metadata: Optional[Dict[str, Any]] = None,
     threshold: float = DEFAULT_THRESHOLD,
     dpi: int = 300,
+    feature_medians: Optional[Sequence[float] | Dict[str, float] | pd.Series] = None,
+    training_medians: Optional[Sequence[float] | Dict[str, float] | pd.Series] = None,
 ) -> Dict[str, Any]:
     """Produce the full explanation set and record what it depicts.
 
@@ -548,7 +753,12 @@ def explain_model(
             continue
         path = output_dir / f"shap_waterfall_{case}.png"
         explainer.plot_local_decision(
-            X, index=selection.position, save_path=str(path), dpi=dpi,
+            X,
+            index=selection.position,
+            save_path=str(path),
+            dpi=dpi,
+            feature_medians=feature_medians,
+            training_medians=training_medians,
         )
         waterfall_files[case] = path.name
 

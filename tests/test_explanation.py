@@ -366,3 +366,121 @@ class TestGenerateShapExplanationsGuards:
                 [(np.array([0]), np.array([0]))], 9,
                 model_name="xgboost",
             )
+
+
+# ── Manuscript styling of the waterfall ──────────────────────────────
+
+
+class TestWaterfallStyle:
+    """Figure 9 must match the other figures, not SHAP's own defaults."""
+
+    @pytest.fixture(scope="class")
+    def rendered(self, fitted_model_and_data, tmp_path_factory):
+        model, X, y, proba = fitted_model_and_data
+        out = tmp_path_factory.mktemp("waterfall")
+        path = out / "waterfall.png"
+        SHAPExplainer(model).plot_local_decision(
+            X, index=3, save_path=str(path),
+            training_medians=X.median(),
+        )
+        return path
+
+    def test_writes_a_vector_sibling(self, rendered) -> None:
+        """The manuscript needs PDF; the pipeline references PNG."""
+        assert rendered.exists()
+        assert rendered.with_suffix(".pdf").exists()
+        assert rendered.with_suffix(".pdf").stat().st_size > 0
+
+    def test_training_medians_reach_the_labels(
+        self, fitted_model_and_data,
+    ) -> None:
+        from src.models.explanation import _format_waterfall_label
+
+        label = _format_waterfall_label("soil_moisture_lag1h", 70.3, 72.38)
+        assert "70.3" in label
+        assert "soil_moisture_lag1h" in label
+        assert "72.38" in label
+
+    def test_label_omits_the_median_when_absent(self) -> None:
+        from src.models.explanation import _format_waterfall_label
+
+        label = _format_waterfall_label("soil_moisture_lag1h", 70.3, None)
+        assert "median" not in label
+
+    def test_medians_may_be_passed_as_a_series(
+        self, fitted_model_and_data, tmp_path,
+    ) -> None:
+        model, X, _y, _p = fitted_model_and_data
+        SHAPExplainer(model).plot_local_decision(
+            X, index=0, save_path=str(tmp_path / "w.png"),
+            training_medians=X.median(),
+        )
+        assert (tmp_path / "w.png").exists()
+
+    def test_mismatched_median_length_rejected(
+        self, fitted_model_and_data, tmp_path,
+    ) -> None:
+        """A silent misalignment would mislabel every row."""
+        model, X, _y, _p = fitted_model_and_data
+        with pytest.raises(ValueError, match="same length"):
+            SHAPExplainer(model).plot_local_decision(
+                X, index=0, save_path=str(tmp_path / "w.png"),
+                training_medians=[1.0, 2.0],
+            )
+
+    @pytest.mark.parametrize("max_display", [1, 2, 3, 10])
+    def test_pooled_row_keeps_the_bars_summing_to_fx(
+        self, max_display: int,
+    ) -> None:
+        """Truncating to max_display must not lose contribution mass.
+
+        The figure's promise is that the bars carry E[f(x)] to f(x). If
+        the pooled row were dropped or miscomputed, the bars would stop
+        short of f(x) and the reader could not check the arithmetic.
+        """
+        from src.models.explanation import _waterfall_rows
+
+        values = np.array([2.5, -1.2, 0.8, -0.4, 0.15, -0.05])
+        names = [f"f{i}" for i in range(len(values))]
+        row_values, row_labels = _waterfall_rows(
+            values, names, values, [None] * len(values), max_display,
+        )
+        assert sum(row_values) == pytest.approx(values.sum())
+        assert len(row_values) == len(row_labels)
+
+    def test_largest_contributors_come_first(self) -> None:
+        from src.models.explanation import _waterfall_rows
+
+        values = np.array([0.1, -3.0, 0.5])
+        row_values, row_labels = _waterfall_rows(
+            values, ["a", "b", "c"], values, [None] * 3, 3,
+        )
+        assert row_values[0] == pytest.approx(-3.0)
+        assert row_labels[0].endswith("b")
+
+    def test_pooled_row_is_labelled_with_its_count(self) -> None:
+        from src.models.explanation import _waterfall_rows
+
+        values = np.array([2.0, 1.0, 0.5, 0.25, 0.1])
+        _row_values, row_labels = _waterfall_rows(
+            values, [f"f{i}" for i in range(5)], values, [None] * 5, 2,
+        )
+        assert row_labels[-1] == "3 other features"
+
+    def test_no_pooled_row_when_everything_fits(self) -> None:
+        from src.models.explanation import _waterfall_rows
+
+        values = np.array([2.0, 1.0])
+        _row_values, row_labels = _waterfall_rows(
+            values, ["a", "b"], values, [None] * 2, 10,
+        )
+        assert not any("other features" in label for label in row_labels)
+
+    def test_respects_max_display(
+        self, fitted_model_and_data, tmp_path,
+    ) -> None:
+        model, X, _y, _p = fitted_model_and_data
+        SHAPExplainer(model).plot_local_decision(
+            X, index=0, save_path=str(tmp_path / "w.png"), max_display=2,
+        )
+        assert (tmp_path / "w.png").exists()

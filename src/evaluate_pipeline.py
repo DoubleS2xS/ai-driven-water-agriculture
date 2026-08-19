@@ -844,8 +844,17 @@ def generate_shap_explanations(
     y_test = y.iloc[test_idx]
     y_proba = predictor.predict_proba(X_test)[:, 1]
 
+    # Medians of the fold's TRAINING rows, annotated onto the waterfall
+    # labels. They are what makes a raw feature value readable: 71.02 %
+    # soil moisture looks wet against the whole record, yet sits at the
+    # 2.7th percentile of this fold's training data. Test-block medians
+    # would describe the same data the instance came from and so explain
+    # nothing.
+    training_medians = X.iloc[train_idx].median()
+
     logger.info(
-        "Explaining %s on fold %d: %d held-out rows, %d positive",
+        "Explaining %s on fold %d: %d held-out rows, %d positive; "
+        "waterfall labels annotated with training-fold medians",
         model_name, fold, len(X_test), int(y_test.sum()),
     )
 
@@ -857,6 +866,7 @@ def generate_shap_explanations(
         output_dir,
         timestamps=timestamps.iloc[test_idx].to_numpy(),
         row_indices=test_idx,
+        training_medians=training_medians,
         metadata={
             "model": model_name,
             "fold": fold,
@@ -864,6 +874,9 @@ def generate_shap_explanations(
             "fold_test_start": str(timestamps.iloc[test_idx[0]]),
             "fold_test_end": str(timestamps.iloc[test_idx[-1]]),
             "fold_test_positive_rate": float(y_test.mean()),
+            "training_medians": {
+                str(k): float(v) for k, v in training_medians.items()
+            },
         },
     )
 
