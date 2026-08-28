@@ -107,12 +107,13 @@ alongside every aggregate. See `data/outputs/folds.csv`.
 │       ├── irrigation_ml.py      XGBoost / LightGBM wrapper
 │       └── explanation.py        SHAP figures and instance selection
 │
-├── tests/                        416 tests
+├── tests/                        443 tests
 │   ├── test_features.py          41   causality contract, leakage guard
+│   ├── test_explanation.py       54   SHAP selection, waterfall styling
+│   ├── test_readme_consistency.py 14  README numbers vs data/outputs/
 │   ├── test_sensitivity.py       39   episode dominance, subset aggregates
 │   ├── test_baselines.py         37   baselines and metrics
 │   ├── test_statistics.py        37   intervals, bootstrap
-│   ├── test_explanation.py       34   SHAP instance selection
 │   ├── test_data_loader.py       32   merge, timezone, diurnal alignment
 │   ├── test_onset.py             32   episodes, onset target, restriction
 │   ├── test_validation.py        31   fold ordering, preprocessing leakage
@@ -149,7 +150,7 @@ pip install -r requirements.txt
 python -m src.data_loader --config configs/default.yaml   # rebuild dataset
 python -m src.evaluate_pipeline                           # main experiment
 python -m src.robustness_experiment                       # robustness study
-pytest -q                                                 # 416 tests
+pytest -q                                                 # 443 tests
 ```
 
 Useful flags for `evaluate_pipeline`:
@@ -212,16 +213,17 @@ Headline findings, all reproducible from those files:
    the easy late-season regime — which is why the holdout is reported as
    a secondary result only.
 2. **Tuning does not change this.** Nested cross-validation, selecting on
-   inner folds of each training block only, moves PR-AUC by −0.001
-   (XGBoost) and −0.033 (LightGBM) — both still below the threshold
-   baseline's 0.700. The finding is not an artifact of library defaults.
+   inner folds of each training block only, moves PR-AUC by +0.005
+   (XGBoost, 0.596 → 0.601) and −0.027 (LightGBM, 0.657 → 0.631) — both
+   still below the threshold baseline's 0.700. The finding is not an
+   artifact of library defaults.
 3. Weather **degrades** performance: adding the 16 meteorological features
    to the soil-moisture lags lowers PR-AUC (ablation A → B).
 4. The leakage control (set E, weather only) sits at chance —
    ROC-AUC ≈ 0.51–0.54 against a no-skill 0.50.
 5. Predicting **when irrigation starts** is much harder than predicting
    whether it is ongoing, but still well above chance: PR-AUC 0.385
-   against a no-skill 0.045. The threshold baseline leads here too.
+   against a no-skill 0.053. The threshold baseline leads here too.
 6. One 117-hour episode supplies 37.7 % of all positive hours and falls
    inside a single fold, inflating every model's PR-AUC by roughly 0.10.
    Excluding that fold by a **data-driven rule** lowers the absolute
@@ -255,8 +257,11 @@ is stated before any model is fitted. Observed dominance:
 | 5 | 15 | 15 h | 0.259 | no |
 
 The separation is wide, not borderline. Excluding fold 4 lowers PR-AUC by
-0.075–0.113 across models but **does not change the ranking**, so the
-all-folds figures may be quoted provided the inflation is stated.
+0.075–0.130 across all six models — least for the moisture threshold
+(−0.075), most for the majority baseline (−0.130) — but **does not change
+the ranking**, so the all-folds figures may be quoted provided the
+inflation is stated. Under nested CV the drop is −0.100 (XGBoost) and
+−0.092 (LightGBM).
 
 Exclusions are applied **per protocol**, because fold numbers index
 different periods when the row sets differ: the onset protocol splits
@@ -301,8 +306,16 @@ explicitly: `irrigation_event_lag1h` becomes constant and is dropped, and
 the persistence baseline degenerates into the majority baseline and is
 excluded rather than reported twice.
 
-Roughly 4.5 % of eligible hours are onsets, so folds hold a handful of
-positives each and intervals are wide. Results: `onset_results.csv`.
+Onsets are 45 of the 1 003 eligible hours (4.5 %) across the whole design
+matrix, but **5.3 %** of the 835 hours that actually fall in a test block.
+The reported PR-AUC is a fold average over those test blocks, so **0.053
+is its no-skill reference** — the majority baseline scores exactly that.
+The two figures are both correct and describe different row sets; quoting
+4.5 % against a fold-averaged PR-AUC would compare a metric to the
+prevalence of data it was not computed on.
+
+Either way the folds hold a handful of positives each, so the intervals
+are wide. Results: `onset_results.csv`, per-fold in `per_fold_metrics.csv`.
 
 ---
 
